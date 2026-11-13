@@ -9,8 +9,13 @@ import '@fontsource/manrope/700.css';
 import '@fontsource/manrope/800.css';
 import { createRoot } from 'react-dom/client';
 import App from './screens/App';
+import { CompactWindow, DockWindow, MenuWindow } from './screens/OverlayWindows';
 import { APP_NAME } from '../../bridge/src';
 document.title = APP_NAME;
 import './styles.css';
 
-createRoot(document.getElementById('root')!).render(<React.StrictMode><App /></React.StrictMode>);
+const route = window.location.hash.replace(/^#\/?/, '').split('?')[0];
+const overlay = route === 'dock' || route === 'compact' || route === 'menu';
+if (overlay) document.documentElement.classList.add('overlay-window');
+const screen = route === 'dock' ? <DockWindow/> : route === 'compact' ? <CompactWindow/> : route === 'menu' ? <MenuWindow/> : <App/>;
+createRoot(document.getElementById('root')!).render(<React.StrictMode>{screen}</React.StrictMode>);

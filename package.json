@@ -11,7 +11,8 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "dev:peers": "tsx scripts/dev-peers.ts",
-    "tauri": "tauri --config apps/desktop/src-tauri/tauri.conf.json"
+    "tauri": "tauri --config apps/desktop/src-tauri/tauri.conf.json",
+    "dev:overlay-check": "pnpm exec tauri dev --config apps/desktop/src-tauri/tauri.conf.json"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.15",
