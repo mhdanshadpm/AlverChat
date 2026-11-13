@@ -5,7 +5,7 @@ use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::time::Duration;
 
 use ed25519_dalek::{Signature, VerifyingKey};
-use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
+use mdns_sd::{ResolvedService, ServiceDaemon, ServiceEvent, ServiceInfo};
 
 use crate::{identity::Identity, peer_id};
 
@@ -41,7 +41,14 @@ impl PeerBeacon {
     }
 
     pub fn verify(&self) -> bool {
-        if self.v != PROTOCOL_VERSION || self.peer_id != peer_id(&self.public_key) {
+        if self.v != PROTOCOL_VERSION
+            || self.peer_id != peer_id(&self.public_key)
+            || self.name.is_empty()
+            || self.name.len() > 128
+            || self.name.chars().any(char::is_control)
+            || self.host.is_empty()
+            || self.port == 0
+        {
             return false;
         }
         let Ok(key) = VerifyingKey::from_bytes(&self.public_key) else {
@@ -64,6 +71,48 @@ impl PeerBeacon {
             &signature,
         )
     }
+
+    pub fn from_mdns(service: &ResolvedService) -> Option<Self> {
+        let properties = service.get_properties();
+        let version = properties.get_property_val_str("protocol")?.parse().ok()?;
+        let peer_id = properties.get_property_val_str("peer_id")?.to_owned();
+        let name = properties.get_property_val_str("name")?.to_owned();
+        let public_key = decode_hex::<32>(properties.get_property_val_str("public_key")?)?;
+        let signature = decode_hex::<64>(properties.get_property_val_str("signature")?)?.to_vec();
+        let beacon = Self {
+            v: version,
+            peer_id,
+            name,
+            host: service.get_hostname().to_owned(),
+            port: service.get_port(),
+            public_key,
+            signature,
+        };
+        beacon.verify().then_some(beacon)
+    }
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
+fn decode_hex<const N: usize>(value: &str) -> Option<[u8; N]> {
+    if value.len() != N * 2 {
+        return None;
+    }
+    let mut decoded = [0; N];
+    for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
+        let high = (pair[0] as char).to_digit(16)? as u8;
+        let low = (pair[1] as char).to_digit(16)? as u8;
+        decoded[index] = (high << 4) | low;
+    }
+    Some(decoded)
 }
 
 fn signed_bytes(v: u16, id: &str, name: &str, host: &str, port: u16, key: &[u8; 32]) -> Vec<u8> {
@@ -93,26 +142,28 @@ impl MdnsDiscovery {
             .map_err(|error| error.to_string())
     }
 
-    pub fn publish(
-        &self,
-        peer_id: &str,
-        display_name: &str,
-        hostname: &str,
-        addresses: &[IpAddr],
-        port: u16,
-    ) -> Result<(), String> {
-        let suffix: String = peer_id.chars().take(12).collect();
+    pub fn publish(&self, beacon: &PeerBeacon, addresses: &[IpAddr]) -> Result<(), String> {
+        if !beacon.verify() || beacon.name.len() > 128 {
+            return Err("invalid signed LAN announcement".into());
+        }
+        let suffix: String = beacon.peer_id.chars().take(12).collect();
         let instance = format!("alverchat-{suffix}");
-        let name_property = ("name", display_name);
-        let peer_property = ("peer_id", peer_id);
-        let port_property = ("protocol", "1");
-        let properties = [name_property, peer_property, port_property];
+        let public_key = encode_hex(&beacon.public_key);
+        let signature = encode_hex(&beacon.signature);
+        let version = beacon.v.to_string();
+        let properties = [
+            ("name", beacon.name.as_str()),
+            ("peer_id", beacon.peer_id.as_str()),
+            ("protocol", version.as_str()),
+            ("public_key", public_key.as_str()),
+            ("signature", signature.as_str()),
+        ];
         let service = ServiceInfo::new(
             SERVICE_TYPE,
             &instance,
-            hostname,
+            &beacon.host,
             addresses,
-            port,
+            beacon.port,
             &properties[..],
         )
         .map_err(|error| error.to_string())?
@@ -200,5 +251,17 @@ mod tests {
         let mut beacon = PeerBeacon::signed(&identity, "Ari".into(), "127.0.0.1".into(), 45000);
         beacon.public_key = [0; 32];
         assert!(!beacon.verify());
+
+        let mut beacon = PeerBeacon::signed(&identity, "Ari".into(), "127.0.0.1".into(), 45000);
+        beacon.name = "A".repeat(129);
+        assert!(!beacon.verify());
+    }
+
+    #[test]
+    fn hex_encoding_round_trips_and_rejects_malformed_values() {
+        let bytes = [0x00, 0x7f, 0xa5, 0xff];
+        assert_eq!(decode_hex::<4>(&encode_hex(&bytes)), Some(bytes));
+        assert_eq!(decode_hex::<4>("007fa5"), None);
+        assert_eq!(decode_hex::<4>("007fa5xz"), None);
     }
 }

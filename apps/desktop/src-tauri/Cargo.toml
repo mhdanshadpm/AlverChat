@@ -14,6 +14,9 @@ serde_json.workspace = true
 uuid.workspace = true
 alver-core = { path = "../../../crates/alver-core" }
 rand_core.workspace = true
+mdns-sd.workspace = true
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies.keyring]
 version = "3.6.3"

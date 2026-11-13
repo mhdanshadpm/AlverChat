@@ -2,21 +2,19 @@
 
 mod drag;
 
-use alver_core::{storage::Store, Hlc, Message};
+use alver_core::{
+    discovery::{MdnsDiscovery, PeerBeacon},
+    identity::Identity,
+    storage::Store,
+};
 use drag::{Edge, Rect};
+use mdns_sd::{RecvTimeoutError, ServiceEvent};
 use rand_core::{OsRng, RngCore};
 use serde::Serialize;
-use std::{
-    collections::HashMap,
-    fs,
-    path::PathBuf,
-    sync::Mutex,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{collections::HashMap, fs, path::PathBuf, sync::Mutex};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
-use uuid::Uuid;
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -116,6 +114,83 @@ fn publish(app: &AppHandle) {
     let _ = app.emit("overlay-state", snapshot(app));
 }
 
+fn upsert_discovered_peer(app: &AppHandle, beacon: PeerBeacon) {
+    let state = app.state::<OverlayState>();
+    let Ok(mut peers) = state.peers.lock() else {
+        return;
+    };
+    let peer_id = beacon.peer_id.clone();
+    let peer = PeerDto {
+        id: peer_id.clone(),
+        name: beacon.name.clone(),
+        initials: beacon
+            .name
+            .split_whitespace()
+            .filter_map(|part| part.chars().next())
+            .take(2)
+            .collect::<String>()
+            .to_uppercase(),
+        color: "violet".into(),
+        online: false,
+        status: "Discovered on LAN · messaging unavailable".into(),
+        preview: String::new(),
+        time: String::new(),
+        unread: None,
+        group: false,
+        typing: false,
+        muted: false,
+        pinned: false,
+    };
+    if let Some(existing) = peers.iter_mut().find(|peer| peer.id == peer_id) {
+        *existing = peer;
+    } else {
+        peers.push(peer);
+    }
+    drop(peers);
+    publish(app);
+}
+
+fn start_peer_discovery(app: AppHandle, identity: Identity) -> Result<(), String> {
+    let mdns = MdnsDiscovery::new()?;
+    let host = format!("alverchat-{}.local.", &identity.peer_id()[..12]);
+    let display_name = "AlverChat user".to_owned();
+    let beacon = PeerBeacon::signed(&identity, display_name, host, 47_987);
+    mdns.publish(&beacon, &[])?;
+    let events = mdns.browse()?;
+    let self_id = beacon.peer_id.clone();
+    std::thread::spawn(move || {
+        let _daemon = mdns;
+        let mut discovered_services = HashMap::<String, String>::new();
+        loop {
+            match events.recv_timeout(std::time::Duration::from_secs(1)) {
+                Ok(ServiceEvent::ServiceResolved(service)) => {
+                    let Some(beacon) = PeerBeacon::from_mdns(&service) else {
+                        continue;
+                    };
+                    if beacon.peer_id == self_id {
+                        continue;
+                    }
+                    discovered_services
+                        .insert(service.get_fullname().to_owned(), beacon.peer_id.clone());
+                    upsert_discovered_peer(&app, beacon);
+                }
+                Ok(ServiceEvent::ServiceRemoved(fullname, _)) => {
+                    if let Some(peer_id) = discovered_services.remove(&fullname) {
+                        if let Ok(mut peers) = app.state::<OverlayState>().peers.lock() {
+                            peers.retain(|peer| peer.id != peer_id);
+                        }
+                        publish(&app);
+                    }
+                }
+                Ok(_) => {}
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+    });
+    Ok(())
+}
+
 #[tauri::command]
 fn app_name() -> &'static str {
     alver_core::APP_NAME
@@ -161,43 +236,13 @@ fn list_messages(app: AppHandle, chat_id: String) -> Result<Vec<MessageDto>, Str
     })
 }
 #[tauri::command]
-fn send_message(app: AppHandle, chat_id: String, text: String) -> Result<MessageDto, String> {
+fn send_message(chat_id: String, text: String) -> Result<MessageDto, String> {
     let text = text.trim();
     if chat_id.trim().is_empty() || text.is_empty() || text.len() > 16_384 {
         return Err("Message must have a chat and contain 1–16384 bytes.".into());
     }
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| error.to_string())?
-        .as_millis() as u64;
-    let msg = MessageDto {
-        id: Uuid::now_v7().to_string(),
-        sender: "local".into(),
-        text: text.into(),
-        time: String::new(),
-        mine: true,
-        read: false,
-        kind: "text".into(),
-        file_name: None,
-        timestamp_ms: now,
-    };
-    app.state::<OverlayState>()
-        .store
-        .lock()
-        .map_err(|_| "message store lock poisoned")?
-        .save_message(&Message {
-            id: Uuid::parse_str(&msg.id).map_err(|error| error.to_string())?,
-            chat_id,
-            sender: "local".into(),
-            body: text.into(),
-            clock: Hlc {
-                physical_ms: now,
-                logical: 0,
-            },
-            tombstone: false,
-        })?;
-    publish(&app);
-    Ok(msg)
+    let _ = (chat_id, text);
+    Err("Messaging is unavailable until secure peer transport is implemented.".into())
 }
 #[tauri::command]
 fn overlay_snapshot(app: AppHandle) -> OverlaySnapshot {
@@ -1008,6 +1053,27 @@ fn database_key() -> Result<[u8; 32], String> {
         .map_err(|_| "The saved database key has an invalid length.".into())
 }
 
+fn identity_key() -> Result<Identity, String> {
+    let entry = keyring::Entry::new("AlverChat", "peer-identity-signing-key")
+        .map_err(|error| format!("Cannot access the system credential store: {error}"))?;
+    let secret = match entry.get_secret() {
+        Ok(secret) => secret,
+        Err(keyring::Error::NoEntry) => {
+            let identity = Identity::generate();
+            let secret = identity.secret_bytes();
+            entry
+                .set_secret(&secret)
+                .map_err(|error| format!("Cannot save the peer identity securely: {error}"))?;
+            secret.to_vec()
+        }
+        Err(error) => return Err(format!("Cannot read the peer identity securely: {error}")),
+    };
+    let secret: [u8; 32] = secret
+        .try_into()
+        .map_err(|_| "The saved peer identity has an invalid length.".to_string())?;
+    Ok(Identity::from_secret(secret))
+}
+
 fn open_message_store(app: &AppHandle) -> Result<Store, String> {
     let directory = app
         .path()
@@ -1023,6 +1089,8 @@ fn open_message_store(app: &AppHandle) -> Result<Store, String> {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             let preferences_path = app.path().app_config_dir()?.join("overlay-settings.json");
             if let Some(parent) = preferences_path.parent() {
@@ -1047,6 +1115,12 @@ fn main() {
                 compact_detached: Mutex::new(false),
                 cursor_capture: Mutex::new(HashMap::new()),
             });
+            match identity_key()
+                .and_then(|identity| start_peer_discovery(app.handle().clone(), identity))
+            {
+                Ok(()) => {}
+                Err(error) => eprintln!("LAN discovery is unavailable: {error}"),
+            }
             let show = MenuItem::with_id(app, "show", "Open AlverChat", true, None::<&str>)?;
             let reset = MenuItem::with_id(
                 app,

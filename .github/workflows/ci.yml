@@ -12,6 +12,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - run: pnpm test
+      - run: pnpm lint
       - run: if rg -n 'https?://' packages/ui/src; then exit 1; fi
   rust:
     strategy:
@@ -23,3 +24,5 @@ jobs:
         with: {components: rustfmt, clippy}
       - run: cargo fmt --all -- --check
       - run: cargo test -p alver-core
+      - run: cargo test -p alverchat-desktop
+      - run: cargo clippy -p alverchat-desktop -- -D warnings
