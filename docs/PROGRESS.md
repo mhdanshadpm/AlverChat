@@ -1,17 +1,15 @@
 # Build progress
 
-Updated 2026-11-13 10:52 (Asia/Kolkata).
+Updated 2026-11-13 13:23 (Asia/Kolkata).
 
-- [x] Phase 1 — workspace, CI, tokens, bridge, mock mode, component gallery (2026-11-13 09:36 Asia/Kolkata)
-- [ ] Phase 2 — core identity, security, discovery, transport, storage, outbox (in progress 2026-11-13 10:35 Asia/Kolkata: identity/signatures, Argon2id/XChaCha helper, SQLCipher schema/FTS/outbox API, protocol/HLC with size/version validation, mDNS advertisement/browse, signed UDP beacon; TLS WebSocket and keychain wiring remain. TLS WebSocket attempt deferred after three integration build failures; see BLOCKERS.md)
-- [ ] Phase 3 — messaging, groups, files, search (in progress 2026-11-13 10:49 Asia/Kolkata: mock chat search/send, custom context menu, reply/edit/local-delete/tombstone, People/Groups lists, local group creation with member selection and avatar color; Rust core signs and atomically persists group rosters, checks admin updates and successor epochs, rejects stale updates, and protects Everyone group state. Persistent message edits keep revision history; sender-only tombstones remove FTS entries and prevent resurrection. FTS search quotes user terms and caps query/result bounds. File receiver validates names, enforces the 500 MB default and 64 KiB chunks, and verifies BLAKE3; pause/resume and transport integration remain)
-- [ ] Phase 4 — dock, floating icon, bubbles, compact window
-- [ ] Phase 5 — full UI screens and interactions (in progress 2026-11-13 10:23 Asia/Kolkata: profile/onboarding, People/Groups, every settings category, context actions, LAN announcement/acknowledgement mock)
-- [ ] Phase 6 — calls and screen sharing (call window previews for voice/video/group; media/signaling not connected)
-- [ ] Phase 7 — backup, updater scaffolding, tray, hotkey, i18n (in progress 2026-11-13 10:52 Asia/Kolkata: core can encrypt/authenticate opaque backup payloads with Argon2id/XChaCha and fresh salt/nonce; database/avatar archive creation and export UI, updater, tray, hotkey, and i18n remain)
-- [ ] Phase 8 — hardening, accessibility, packaging, docs
-- [ ] Phase 9 — optional legacy/mobile stubs
+- [x] Phase 1 — Rust workspace, typed bridge, UI foundation, mock adapter, design assets, CI baseline.
+- [ ] Phase 2 — Ed25519 identity and signed mDNS discovery are wired into the desktop app; identity and SQLCipher keys use the OS credential store. Message transport, peer trust-on-first-use, online heartbeats, reconnect, and end-to-end delivery remain.
+- [ ] Phase 3 — Encrypted local message history and persistent core outbox are present. Seeded conversations and fake chat content were removed; unsupported message sending, groups, calls, and file actions report unavailable. Real network messaging, group membership, receipts, edits/reactions synchronization, and file transfer remain.
+- [x] Phase 4 — Native dock and compact windows are implemented, draggable with saved position, edge snapping, click-through hit testing, bubble timeout setting, and click-to-open compact behavior. Needs hands-on Windows/macOS validation.
+- [ ] Phase 5 — Main screens, profile editing, and settings UI are present. Profile and preferences persist locally; fake history and fabricated media/call stats were removed; unsupported settings and actions are disabled. Profile photo sync, real group UI, localization, and full accessibility review remain.
+- [ ] Phase 6 — Call layouts remain unavailable; signaling, WebRTC, group calls, PiP, and screen sharing are not connected.
+- [ ] Phase 7 — Tauri updater is configured for signed GitHub Release artifacts, the update check/install flow is wired, and the release workflow builds Windows x64 plus Apple Silicon macOS. Encrypted backup primitives exist; database backup/export/restore, tray extras, hotkeys, and i18n remain.
+- [ ] Phase 8 — Rust/UI CI checks pass locally. GitHub Actions workflows are published but no hosted run has been observed yet. Code signing/notarization, Windows/macOS hosted build verification, security fuzzing, performance and accessibility passes remain.
+- [ ] Phase 9 — Linux/mobile stubs and legacy import were not added.
 
-Screens implemented as mock UI: full chat, people, groups (including local group creation with member selection and avatar color), call history, voice/video/group call previews, profile, three-step onboarding, all settings categories, LAN announcements, floating icon/bubbles, compact quick-chat drawer, component gallery. Interactions include chat search, send, context menu, reply/edit/delete, theme, and profile edits. Core group-state checks require admin signatures, preserve membership invariants and require the next epoch for accepted updates. Remaining: native always-on-top dock/bubbles, real compact-window resizing, persistent settings/profile, live network group/file actions, TLS calls/signaling and WebRTC. This is a foundation build; later phases are not yet complete.
-
-Checkpoint report: [MORNING_REPORT.md](MORNING_REPORT.md) records the current implementation, limitations, hand checks, and run/build commands. It explicitly marks the nine-phase request incomplete.
+Public repository: https://github.com/mhdanshadpm/AlverChat. `main`, the previous local branches, and the existing checkpoint tag are pushed. The app is not production-ready until the remaining network, messaging, and platform work is completed.

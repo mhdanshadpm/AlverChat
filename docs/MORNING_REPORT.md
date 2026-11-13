@@ -1,59 +1,50 @@
-# AlverChat morning report
+# AlverChat progress report
 
-Updated 2026-11-13 (Asia/Kolkata). This report describes the current build checkpoint; the requested nine-phase product is **not complete**.
+Updated 2026-11-13 (Asia/Kolkata). The product is still incomplete and should not be described as production-ready.
 
-## Done
+## Implemented
 
-- Created the Tauri 2 / Rust workspace, React 18 / TypeScript UI, typed bridge boundary, mock mode, component gallery, CSP, bundled fonts, and design-board crops/color samples.
-- Built light/dark chat, People, Groups, Calls, Settings, profile and onboarding screens, floating icon/bubbles, quick-chat drawer, context menus, announcements, and call-window previews. These visible peer, message, group, and call experiences remain mock-backed.
-- Added Rust primitives for Ed25519 identity, Argon2id/XChaCha payload encryption, SQLCipher storage and FTS, persistent outbox, signed discovery beacons, versioned envelopes/HLC, signed and persisted group rosters, sender-only message edits/tombstones, bounded FTS search, BLAKE3-verified file reception, and an authenticated encrypted backup container for opaque payload bytes.
-- Added tests for crypto, storage, protocol, group authorization/epochs, message tombstones, file bounds/hash/path handling, and backup authentication.
+- Tauri 2 desktop shell with native always-on-top dock and compact windows, saved draggable positioning, edge snapping, transparent hit testing, and click-to-open compact behavior.
+- Removes seeded demo peers, messages, fabricated call history, and fake media details. Empty states use live peer/message counts. Unsupported messaging, calls, group creation, and settings are disabled or report unavailable.
+- Ed25519 identity persisted through the system credential store; signed mDNS service advertisements are verified before showing discovered peers.
+- SQLCipher message database with its key stored in the OS credential store, ordered local history, and persistent core outbox primitives.
+- Profile/theme/preferences persistence on this device. Bubble auto-hide preference and dock snapping are connected to desktop behavior.
+- Tauri signed updater configured for GitHub Releases. The About page can check for an update, ask before install, download it, and relaunch. A GitHub Actions release workflow builds Windows x64 and Apple Silicon macOS artifacts on `v*` tags.
+- Public repository: https://github.com/mhdanshadpm/AlverChat. The private updater signing key is stored in GitHub Actions secrets; only its public key is committed.
 
-## Incomplete, skipped, and blocked
+## Still incomplete
 
-- **Phase 2:** TLS WebSocket integration, TOFU certificate verification, OS keychain persistence, outbox replay, peer trust management, and the two-peer headless demo are not connected. A first transport attempt was removed after three build iterations and recorded in [BLOCKERS.md](BLOCKERS.md). The UI still uses mock data in the desktop shell.
-- **Phase 3:** UI group creation is session-local; group APIs are not wired through the bridge. Live messaging, receipts, typing, reactions, pins/stars/forwarding, file transport/pause/resume, and voice notes are incomplete.
-- **Phase 4:** Floating icon and bubbles are rendered inside the app UI; there are no native always-on-top dock/compact/menu windows, native hit testing, tray, or global hotkey.
-- **Phase 5:** Main screens and visual states exist, but several actions are presentation-only. Profile photos, group info/permissions, persisted settings, full accessibility review, and responsive mobile layout are incomplete.
-- **Phase 6:** Voice/video/group call layouts are previews only. Signaling, WebRTC, PiP, incoming-call flow, and screen sharing are not connected.
-- **Phase 7:** Only an encrypted opaque-payload backup helper exists. Database/avatar export and restore, updater, tray, hotkey, launch-at-login, and i18n are incomplete.
-- **Phase 8:** No Windows build/installer, macOS signed package, screenshot comparison suite, performance pass, security fuzzing, or full accessibility audit has been completed.
-- **Phase 9:** No legacy importer or Linux/mobile target stubs have been added. No `/legacy` directory was present at initial inspection.
+- Signed discovery currently does not have an active transport listener. Messaging is explicitly unavailable; there is no TLS/WebSocket, TOFU trust store, peer heartbeat, reconnect, send/receive, or outbox delivery integration.
+- Groups, file transfer, receipts, message synchronization, calls/WebRTC, screen sharing, incoming call UI, profile/avatar sync, announcement sync, backup/export/restore, and most notification/call/privacy settings are not implemented.
+- Windows/macOS hosted CI has not yet produced an observed run. Native window behavior has not been visually validated in this session; the computer-use bridge returned `noWindowsAvailable`.
+- macOS notarization and Windows/macOS code signing certificates are not configured. Release installers will require platform trust setup before broad public distribution.
 
-## Decisions and design deviations
+## Local validation
 
-- The initial workspace was empty, so a Vite root with shared packages and a Tauri shell was created.
-- Mock data stays available so the screens can be reviewed offline. The UI's “connected” and peer counts are illustrative and do not indicate live LAN connectivity.
-- Group creation currently adds a group only for the current UI session. The avatar palette is preserved locally; signed group state is available in the Rust core but not wired to that action.
-- Setup, calls, announcement acknowledgements, settings, and call states are visual previews and are not persisted or sent over the LAN.
-- Profile/contact illustrations use initials and gradients rather than bundled photographs. The UI uses CSS for most styling; the requested Radix, Zustand, Framer Motion, TanStack Virtual, and i18next packages are present but are not comprehensively integrated.
+Completed successfully on macOS:
 
-## Manual checks already performed
-
-- On macOS, opened the dev UI and reviewed chat, context menu/reply, Settings, call preview, Groups, and the new-group flow. Created a sample group and verified that selecting a slate avatar color carries through to the chat header and details panel.
-- UI automation remains a local review aid; it does not verify native window behavior, network exchange, or production permissions.
-
-## Hand tests required on real systems
-
-- **Windows 10/11:** Install and launch; verify firewall prompts and LAN discovery on two machines; send/reconnect messages; test scaling and multi-monitor movement; check tray/global hotkey, topmost overlay click-through, compact/main windows, and WebView2 offline packaging.
-- **macOS 12+:** Install and launch; verify Local Network, camera, and microphone permissions; test two-machine discovery and reconnect; check native traffic lights, menu bar behavior, Spaces/full-screen overlay, monitor movement, and universal package/signing behavior.
-- On both systems, verify identity persistence, TOFU key-change warnings, encrypted storage/keychain recovery, edit/delete synchronization, file transfer/hash failure and resume, backup/restore, voice/video/group calls, PiP, and screen sharing. These flows are not implemented yet and should not be treated as passing.
+- `cargo test -p alver-core` — 25 tests passed.
+- `cargo test -p alverchat-desktop` — 6 tests passed.
+- `cargo clippy -p alverchat-desktop -- -D warnings`.
+- `cargo check -p alverchat-desktop` and `cargo fmt --all`.
+- `pnpm lint`, `pnpm test` — 5 tests passed, and `pnpm build`.
+- `pnpm exec tauri build --debug --no-bundle`.
 
 ## Commands
 
 ```sh
-pnpm install
+pnpm install --frozen-lockfile
 pnpm dev
-pnpm dev:peers 2
-pnpm build
+pnpm dev:overlay-check
 pnpm test
 pnpm lint
-pnpm tauri dev
+pnpm build
 cargo fmt --all -- --check
 cargo test -p alver-core
-cargo clippy -p alver-core -p alver-platform -- -D warnings
-cargo check -p alverchat-desktop
-cargo build --workspace
+cargo test -p alverchat-desktop
+cargo clippy -p alverchat-desktop -- -D warnings
 ```
 
-`pnpm dev:peers 2` opens two local mock UI instances only; it does not test LAN traffic. Windows packaging, macOS signing/notarization, and real network/call commands remain to be added and verified.
+## Manual checks still required
+
+On real macOS and Windows devices, validate dock dragging, click-through and compact-window positioning, startup, keychain access, mDNS peer discovery, permissions, updater install/rollback behavior, and installer handling. Message delivery, groups, files and calls cannot yet be manually tested because their transports are not implemented.
