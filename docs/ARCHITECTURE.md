@@ -16,6 +16,7 @@ packages/ui  ->  packages/bridge (PlatformBridge)  ->  apps/desktop (Tauri)
 - Sender-only message edits with revision history, sender-only permanent tombstones, and FTS removal when edited/deleted.
 - Local FTS search quotes user terms and caps query length, term count, and result count; edits replace indexed text and tombstones remove it.
 - File receive primitive validates peer-supplied names and size, bounds chunk size/offsets, writes under an internal transfer ID, and checks BLAKE3 before finalizing.
+- Encrypted backup container primitive uses a fresh Argon2id salt and XChaCha20-Poly1305 nonce; it accepts opaque bytes and is not yet wired to database/avatar export.
 - SQLCipher-backed SQLite open/migration with peers, chats, messages, FTS and an idempotent persistent outbox API.
 - mDNS `_alverchat._tcp.local.` publication/browse and a signed, size-capped UDP broadcast beacon fallback.
 - Tauri 2 main window, CSP and bridge commands. The native command surface currently returns no discovered peers; live transport has not been connected to it.

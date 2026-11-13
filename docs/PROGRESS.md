@@ -1,6 +1,6 @@
 # Build progress
 
-Updated 2026-11-13 10:49 (Asia/Kolkata).
+Updated 2026-11-13 10:52 (Asia/Kolkata).
 
 - [x] Phase 1 — workspace, CI, tokens, bridge, mock mode, component gallery (2026-11-13 09:36 Asia/Kolkata)
 - [ ] Phase 2 — core identity, security, discovery, transport, storage, outbox (in progress 2026-11-13 10:35 Asia/Kolkata: identity/signatures, Argon2id/XChaCha helper, SQLCipher schema/FTS/outbox API, protocol/HLC with size/version validation, mDNS advertisement/browse, signed UDP beacon; TLS WebSocket and keychain wiring remain. TLS WebSocket attempt deferred after three integration build failures; see BLOCKERS.md)
@@ -8,7 +8,7 @@ Updated 2026-11-13 10:49 (Asia/Kolkata).
 - [ ] Phase 4 — dock, floating icon, bubbles, compact window
 - [ ] Phase 5 — full UI screens and interactions (in progress 2026-11-13 10:23 Asia/Kolkata: profile/onboarding, People/Groups, every settings category, context actions, LAN announcement/acknowledgement mock)
 - [ ] Phase 6 — calls and screen sharing (call window previews for voice/video/group; media/signaling not connected)
-- [ ] Phase 7 — backup, updater scaffolding, tray, hotkey, i18n
+- [ ] Phase 7 — backup, updater scaffolding, tray, hotkey, i18n (in progress 2026-11-13 10:52 Asia/Kolkata: core can encrypt/authenticate opaque backup payloads with Argon2id/XChaCha and fresh salt/nonce; database/avatar archive creation and export UI, updater, tray, hotkey, and i18n remain)
 - [ ] Phase 8 — hardening, accessibility, packaging, docs
 - [ ] Phase 9 — optional legacy/mobile stubs
 
