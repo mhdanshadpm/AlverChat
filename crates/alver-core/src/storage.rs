@@ -269,6 +269,42 @@ impl Store {
         transaction.commit().map_err(|error| error.to_string())?;
         Ok(changed == 1)
     }
+
+    /// Search local message text without allowing callers to inject FTS syntax.
+    pub fn search_messages(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<(Uuid, String)>, String> {
+        let terms: Vec<_> = query
+            .split_whitespace()
+            .take(16)
+            .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+            .collect();
+        if terms.is_empty() || query.len() > 256 || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let expression = terms.join(" AND ");
+        let mut statement = self
+            .connection
+            .prepare("SELECT message_id, body FROM message_search WHERE message_search MATCH ?1 LIMIT ?2")
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(params![expression, limit.min(100) as i64], |row| {
+                let id = row.get::<_, String>(0)?;
+                let parsed = Uuid::parse_str(&id).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?;
+                Ok((parsed, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| error.to_string())?;
+        rows.map(|row| row.map_err(|error| error.to_string()))
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -356,6 +392,7 @@ mod tests {
             tombstone: false,
         };
         store.save_message(&message).unwrap();
+        assert_eq!(store.search_messages("original", 10).unwrap().len(), 1);
         let edited_clock = Hlc {
             physical_ms: 2,
             logical: 0,
@@ -370,6 +407,8 @@ mod tests {
             store.get_message(message.id).unwrap().unwrap().body,
             "edited"
         );
+        assert!(store.search_messages("original", 10).unwrap().is_empty());
+        assert_eq!(store.search_messages("edited", 10).unwrap().len(), 1);
         assert!(store.tombstone_message(message.id, "peer-a").unwrap());
         assert!(!store
             .edit_message(message.id, "peer-a", "resurrected", edited_clock)
@@ -377,5 +416,6 @@ mod tests {
         let deleted = store.get_message(message.id).unwrap().unwrap();
         assert!(deleted.tombstone);
         assert!(deleted.body.is_empty());
+        assert!(store.search_messages("edited", 10).unwrap().is_empty());
     }
 }
