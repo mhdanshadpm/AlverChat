@@ -1,6 +1,7 @@
 //! Platform-independent protocol and domain primitives for AlverChat.
 
 pub mod crypto;
+pub mod discovery;
 pub mod identity;
 pub mod storage;
 

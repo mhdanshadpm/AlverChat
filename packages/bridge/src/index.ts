@@ -1,3 +1,4 @@
+export const APP_NAME = "AlverChat";
 export type Peer = { id:string; name:string; initials:string; color:string; online:boolean; status:string; preview:string; time:string; unread?:number; group?:boolean; typing?:boolean; muted?:boolean; pinned?:boolean };
 export type ChatMessage = { id:string; sender:string; text:string; time:string; mine?:boolean; read?:boolean; kind?:'text'|'file'|'event'; fileName?:string };
 export interface PlatformBridge {
@@ -26,3 +27,11 @@ export const mockBridge:PlatformBridge = {
  async sendMessage(id,text){const msg={id:crypto.randomUUID(),sender:'You',text,time:new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit'}),mine:true,read:false} satisfies ChatMessage; (messages[id]??=[]).push(msg);return msg},
  async setTheme(){/* mock preference is stored in the UI */}
 };
+
+export async function bridgeForRuntime():Promise<PlatformBridge>{
+  if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
+    const { tauriBridge } = await import('./tauri');
+    return tauriBridge;
+  }
+  return mockBridge;
+}

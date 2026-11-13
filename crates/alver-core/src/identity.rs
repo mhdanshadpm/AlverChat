@@ -1,4 +1,4 @@
-use ed25519_dalek::{SigningKey, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand_core::OsRng;
 
 /// A fresh local identity. Persist `secret` only through the OS keychain layer.
@@ -39,6 +39,14 @@ impl Identity {
             .map(|pair| format!("{:02X}{:02X}", pair[0], pair[1]))
             .collect::<Vec<_>>()
             .join(" ")
+    }
+
+    pub fn sign(&self, value: &[u8]) -> Signature {
+        self.secret.sign(value)
+    }
+
+    pub fn verify(key: &VerifyingKey, value: &[u8], signature: &Signature) -> bool {
+        key.verify(value, signature).is_ok()
     }
 }
 

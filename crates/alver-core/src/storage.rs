@@ -1,7 +1,7 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
-use crate::{Hlc, Message};
+use crate::{Envelope, Hlc, Message};
 
 /// Encrypted local store. The key must come from the platform keychain.
 pub struct Store {
@@ -38,19 +38,61 @@ impl Store {
                 params![message.chat_id],
             )
             .map_err(|e| e.to_string())?;
-        transaction
+        let inserted = transaction
             .execute(
                 "INSERT INTO messages(id, chat_id, sender, body, physical_ms, logical, tombstone) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT(id) DO NOTHING",
                 params![message.id.to_string(), message.chat_id, message.sender, message.body, message.clock.physical_ms, message.clock.logical, message.tombstone],
             )
             .map_err(|e| e.to_string())?;
-        transaction
-            .execute(
-                "INSERT INTO message_search(message_id, body) VALUES (?1, ?2)",
-                params![message.id.to_string(), message.body],
-            )
-            .map_err(|e| e.to_string())?;
+        if inserted == 1 && !message.tombstone {
+            transaction
+                .execute(
+                    "INSERT INTO message_search(message_id, body) VALUES (?1, ?2)",
+                    params![message.id.to_string(), message.body],
+                )
+                .map_err(|e| e.to_string())?;
+        }
         transaction.commit().map_err(|e| e.to_string())
+    }
+
+    pub fn enqueue(
+        &mut self,
+        peer_id: &str,
+        envelope: &Envelope<serde_json::Value>,
+    ) -> Result<(), String> {
+        let bytes = serde_json::to_vec(envelope).map_err(|error| error.to_string())?;
+        self.connection
+            .execute(
+                "INSERT INTO outbox(id, peer_id, envelope) VALUES (?1, ?2, ?3) ON CONFLICT(id) DO NOTHING",
+                params![envelope.id.to_string(), peer_id, bytes],
+            )
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn pending_outbox(
+        &self,
+        peer_id: &str,
+    ) -> Result<Vec<Envelope<serde_json::Value>>, String> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT envelope FROM outbox WHERE peer_id = ?1 ORDER BY rowid")
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(params![peer_id], |row| row.get::<_, Vec<u8>>(0))
+            .map_err(|error| error.to_string())?;
+        rows.map(|row| {
+            let bytes = row.map_err(|error| error.to_string())?;
+            serde_json::from_slice(&bytes).map_err(|error| error.to_string())
+        })
+        .collect()
+    }
+
+    pub fn acknowledge_outbox(&mut self, id: Uuid) -> Result<bool, String> {
+        self.connection
+            .execute("DELETE FROM outbox WHERE id = ?1", params![id.to_string()])
+            .map(|count| count == 1)
+            .map_err(|error| error.to_string())
     }
 
     pub fn get_message(&self, id: Uuid) -> Result<Option<Message>, String> {
@@ -91,5 +133,28 @@ mod tests {
         };
         store.save_message(&message).unwrap();
         assert_eq!(store.get_message(message.id).unwrap(), Some(message));
+    }
+
+    #[test]
+    fn persistent_outbox_is_ordered_and_acknowledged() {
+        let store_key = [2; 32];
+        let mut store = Store::open(":memory:", &store_key).unwrap();
+        let envelope = Envelope {
+            v: crate::PROTOCOL_VERSION,
+            id: Uuid::now_v7(),
+            kind: "message".into(),
+            from: "self".into(),
+            to: "chat".into(),
+            hlc: Hlc::default(),
+            payload: serde_json::json!({ "body": "queued" }),
+        };
+        store.enqueue("peer", &envelope).unwrap();
+        store.enqueue("peer", &envelope).unwrap();
+        assert_eq!(
+            store.pending_outbox("peer").unwrap(),
+            vec![envelope.clone()]
+        );
+        assert!(store.acknowledge_outbox(envelope.id).unwrap());
+        assert!(store.pending_outbox("peer").unwrap().is_empty());
     }
 }
