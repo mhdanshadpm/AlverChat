@@ -74,68 +74,8 @@ struct OverlayState {
 }
 
 fn peers() -> Vec<PeerDto> {
-    vec![
-        PeerDto {
-            id: "arjun".into(),
-            name: "Arjun Kumar".into(),
-            initials: "AK".into(),
-            color: "peach".into(),
-            online: true,
-            status: "Available".into(),
-            preview: "Invoice updated. Please check.".into(),
-            time: "11:24 AM".into(),
-            unread: Some(3),
-            group: false,
-            typing: false,
-            muted: false,
-            pinned: true,
-        },
-        PeerDto {
-            id: "billing".into(),
-            name: "Billing Team".into(),
-            initials: "BT".into(),
-            color: "violet".into(),
-            online: true,
-            status: "12 members · 4 online".into(),
-            preview: "Anu: Purchase entry completed.".into(),
-            time: "11:20 AM".into(),
-            unread: Some(5),
-            group: true,
-            typing: false,
-            muted: false,
-            pinned: true,
-        },
-        PeerDto {
-            id: "fathima".into(),
-            name: "Fathima P".into(),
-            initials: "FP".into(),
-            color: "rose".into(),
-            online: true,
-            status: "Typing…".into(),
-            preview: "Can you share the stock report?".into(),
-            time: "11:18 AM".into(),
-            unread: None,
-            group: false,
-            typing: true,
-            muted: false,
-            pinned: false,
-        },
-        PeerDto {
-            id: "sarath".into(),
-            name: "Sarath S".into(),
-            initials: "SS".into(),
-            color: "green".into(),
-            online: true,
-            status: "Available".into(),
-            preview: "Video ready, please review.".into(),
-            time: "10:22 AM".into(),
-            unread: Some(1),
-            group: false,
-            typing: false,
-            muted: false,
-            pinned: false,
-        },
-    ]
+    // Until LAN discovery provides real peers, start with an honest empty list.
+    Vec::new()
 }
 fn snapshot(app: &AppHandle) -> OverlaySnapshot {
     let state = app.state::<OverlayState>();

@@ -68,14 +68,24 @@ function useNativeDrag(bridge: PlatformBridge, onClick?: () => void) {
 export function DockWindow() {
   const { bridge, state } = useOverlayState();
   const [draft, setDraft] = useState(''); const [replyId, setReplyId] = useState<string | null>(null);
+  const [bubblesExpired, setBubblesExpired] = useState(false);
   const unread = state.peers.filter(peer => peer.unread).slice(0, 3);
-  useEffect(() => { void bridge.resizeDock(unread.length > 0); }, [bridge, unread.length]);
+  const notificationKey = unread.map(peer => `${peer.id}:${peer.preview}:${peer.time}`).join('|');
+  useEffect(() => {
+    setBubblesExpired(false);
+    if (!notificationKey || localStorage.getItem('alverchat.preference.enable-message-bubbles') === 'false') return;
+    const seconds = Number(localStorage.getItem('alverchat.preference.bubble-auto-hide-delay')) || 8;
+    const timer = window.setTimeout(() => setBubblesExpired(true), seconds * 1000);
+    return () => window.clearTimeout(timer);
+  }, [notificationKey]);
+  const visibleUnread = bubblesExpired || localStorage.getItem('alverchat.preference.enable-message-bubbles') === 'false' ? [] : unread;
+  useEffect(() => { void bridge.resizeDock(visibleUnread.length > 0); }, [bridge, visibleUnread.length]);
   const drag=useNativeDrag(bridge,()=>void bridge.toggleCompact());
   const iconPeer = unread[0] ?? state.peers[0];
   const onPointer = (event: ReactPointerEvent) => { if(!drag.dragging) void bridge.setOverlayHitRegions(Boolean((event.target as HTMLElement).closest('.overlay-hit'))); };
   return <div className={`overlay-canvas dock-canvas dock-side-${state.dockSide}`} onPointerMove={onPointer} onPointerLeave={() => { if(!drag.dragging) void bridge.setOverlayHitRegions(false); }}>
     <div className="dock-stack">
-      <div className={`dock-bubbles overlay-hit ${unread.length ? 'has-bubbles' : ''}`}>{unread.map(peer => <article className="dock-bubble" key={peer.id}>
+      <div className={`dock-bubbles overlay-hit ${visibleUnread.length ? 'has-bubbles' : ''}`}>{visibleUnread.map(peer => <article className="dock-bubble" key={peer.id}>
         <button className="bubble-open" onClick={() => void bridge.openFullApp(peer.id)}><Avatar peer={peer}/><span className="dock-bubble-copy"><b>{peer.name}</b><small>{peer.preview}</small></span><time>{peer.time}</time></button>
         <button className="bubble-reply" aria-label={`Quick reply to ${peer.name}`} onClick={() => setReplyId(replyId === peer.id ? null : peer.id)}><Reply size={14}/></button>
         {replyId === peer.id && <form className="quick-reply" onSubmit={event => { event.preventDefault(); if (draft.trim()) void bridge.sendMessage(peer.id, draft.trim()).then(() => { setDraft(''); setReplyId(null); }); }}><input autoFocus value={draft} onChange={event => setDraft(event.target.value)} placeholder="Reply..."/><button><Send size={14}/></button></form>}

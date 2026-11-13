@@ -6,7 +6,7 @@ packages/ui  ->  packages/bridge (PlatformBridge)  ->  apps/desktop (Tauri)
                                                 ->  crates/alver-core
 ```
 
-`alver-core` has no Tauri or OS dependencies. `alver-platform` owns OS services. UI components use the bridge contract; `mockBridge` keeps gallery and demo states available with no LAN.
+`alver-core` has no Tauri or OS dependencies. `alver-platform` owns OS services. UI components use the bridge contract; `mockBridge` is an empty browser-development adapter and does not seed sample conversations.
 
 ## Implemented foundation
 
@@ -23,4 +23,4 @@ packages/ui  ->  packages/bridge (PlatformBridge)  ->  apps/desktop (Tauri)
 
 ## Not connected yet
 
-No TLS WebSocket transport, peer trust persistence, OS keychain storage, automatic outbox replay, OS overlays, or WebRTC session is active in this build. The visible `8 peers` and chat records are explicitly mock content. Do not use the current mock identity/database as a production security boundary.
+No TLS WebSocket transport, peer trust persistence, OS keychain storage, automatic outbox replay, or WebRTC session is active in this build. Native startup and browser development now use empty peer/message lists. Chat delivery, discovery, calls, and trusted identity are unavailable until their transport and secure storage integration is completed. The current in-memory desktop message state is not durable and must not be treated as a production security boundary.
