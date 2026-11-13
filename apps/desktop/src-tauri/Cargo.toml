@@ -17,6 +17,14 @@ rand_core.workspace = true
 mdns-sd.workspace = true
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+tokio.workspace = true
+tokio-rustls.workspace = true
+tokio-tungstenite.workspace = true
+rustls.workspace = true
+rcgen.workspace = true
+x509-parser.workspace = true
+futures-util.workspace = true
+ed25519-dalek.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies.keyring]
 version = "3.6.3"

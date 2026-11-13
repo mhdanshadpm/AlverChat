@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod drag;
+mod websocket;
 
 use alver_core::{
     discovery::{MdnsDiscovery, PeerBeacon},
@@ -255,6 +256,7 @@ fn upsert_discovered_peer(app: &AppHandle, beacon: PeerBeacon) {
 }
 
 fn start_secure_listener(app: AppHandle, identity: Arc<Identity>) -> Result<u16, String> {
+    let tls_config = websocket::server_config(&identity)?;
     let listener = TcpListener::bind(("0.0.0.0", 0)).map_err(|error| error.to_string())?;
     listener
         .set_nonblocking(true)
@@ -270,6 +272,7 @@ fn start_secure_listener(app: AppHandle, identity: Arc<Identity>) -> Result<u16,
                 Ok((stream, _)) => {
                     let app = app.clone();
                     let identity = identity.clone();
+                    let tls_config = tls_config.clone();
                     let state = app.state::<OverlayState>();
                     let sessions = state.peer_sessions.clone();
                     if sessions
@@ -286,7 +289,9 @@ fn start_secure_listener(app: AppHandle, identity: Arc<Identity>) -> Result<u16,
                         .name("alverchat-peer-session".into())
                         .spawn(move || {
                             let _guard = PeerSessionGuard(guard_sessions);
-                            if let Err(error) = handle_peer_session(app, identity, stream) {
+                            if let Err(error) =
+                                handle_peer_session(app, identity, stream, tls_config)
+                            {
                                 eprintln!("Secure peer session ended: {error}");
                             }
                         });
@@ -311,13 +316,9 @@ fn handle_peer_session(
     app: AppHandle,
     identity: Arc<Identity>,
     stream: TcpStream,
+    tls_config: Arc<rustls::ServerConfig>,
 ) -> Result<(), String> {
-    stream
-        .set_read_timeout(Some(Duration::from_secs(60)))
-        .map_err(|error| error.to_string())?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(10)))
-        .map_err(|error| error.to_string())?;
+    let stream = websocket::accept(stream, tls_config)?;
     let mut session = responder_handshake(stream, &identity)?;
     let remote = session.remote_identity().clone();
     if remote.peer_id == identity.peer_id() {
@@ -410,12 +411,6 @@ fn connect_to_peer(beacon: &PeerBeacon) -> Result<TcpStream, String> {
                 stream
                     .set_nodelay(true)
                     .map_err(|error| error.to_string())?;
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(10)))
-                    .map_err(|error| error.to_string())?;
-                stream
-                    .set_write_timeout(Some(Duration::from_secs(10)))
-                    .map_err(|error| error.to_string())?;
                 return Ok(stream);
             }
             Err(error) => last_error = Some(error),
@@ -435,11 +430,12 @@ fn deliver_envelope(
     envelope: &Envelope<Value>,
 ) -> Result<(), String> {
     let state = app.state::<OverlayState>();
-    let stream = connect_to_peer(beacon)?;
     let expected = RemoteIdentity {
         peer_id: beacon.peer_id.clone(),
         public_key: beacon.public_key,
     };
+    let stream = connect_to_peer(beacon)?;
+    let stream = websocket::connect(stream, &expected.peer_id, expected.public_key)?;
     let mut session = initiator_handshake(stream, &state.identity, &expected)?;
     state
         .store
