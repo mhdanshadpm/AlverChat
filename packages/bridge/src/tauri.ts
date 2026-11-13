@@ -1,5 +1,15 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { ChatMessage, OverlaySnapshot, Peer, PlatformBridge } from './index';
+import type {
+  AppSettings,
+  BackupResult,
+  ChatMessage,
+  ConnectionReport,
+  ExportResult,
+  OverlaySnapshot,
+  Peer,
+  PermissionStatus,
+  PlatformBridge,
+} from './index';
 
 /** Tauri implementation. All native calls stay inside the bridge package. */
 export const tauriBridge: PlatformBridge = {
@@ -26,4 +36,21 @@ export const tauriBridge: PlatformBridge = {
   deleteMessageLocal: (messageId) => invoke<boolean>('delete_message_local', { messageId }),
   editMessageLocal: (messageId, text) => invoke<boolean>('edit_message_local', { messageId, text }),
   getMyIdentity: () => invoke<{ peerId: string; fingerprint: string }>('get_my_identity'),
+  getSettings: () => invoke<AppSettings>('get_settings'),
+  updateSettings: (patch) => invoke<AppSettings>('update_settings', { patch }),
+  setLaunchAtLogin: (enabled) => invoke<boolean>('set_launch_at_login', { enabled }),
+  setHotkey: (combo) => invoke<string>('set_hotkey', { combo }),
+  isDndActive: () => invoke<boolean>('is_dnd_active'),
+  setLanPassphrase: (passphrase) => invoke<boolean>('set_lan_passphrase', { passphrase }),
+  hasLanPassphrase: () => invoke<boolean>('has_lan_passphrase'),
+  permissionStatus: (kind) => invoke<PermissionStatus>('permission_status', { kind }),
+  openPermissionSettings: (kind) => invoke<void>('open_permission_settings', { kind }),
+  openFirewallGuide: () => invoke<string[]>('open_firewall_guide'),
+  runConnectionTest: () => invoke<ConnectionReport>('run_connection_test'),
+  createBackup: (passphrase) => invoke<BackupResult>('create_backup', { passphrase }),
+  listBackups: () => invoke<BackupResult[]>('list_backups'),
+  restoreBackup: (path, passphrase) => invoke<void>('restore_backup', { path, passphrase }),
+  exportData: () => invoke<ExportResult>('export_data'),
+  revealPath: (path) => invoke<void>('reveal_path', { path }),
+  setMutedChat: (chatId, muted) => invoke<string[]>('set_muted_chat', { chatId, muted }),
 };
