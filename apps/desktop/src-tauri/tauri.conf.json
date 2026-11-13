@@ -33,7 +33,7 @@
       "nsis",
       "dmg"
     ],
-    "category": "Communication",
+    "category": "SocialNetworking",
     "createUpdaterArtifacts": true
   },
   "plugins": {
