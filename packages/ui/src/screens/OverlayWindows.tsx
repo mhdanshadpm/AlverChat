@@ -36,14 +36,16 @@ function useNativeDrag(bridge: PlatformBridge, onClick?: () => void) {
     const wasDrag = current.moved;
     if (current.target.hasPointerCapture(current.id)) current.target.releasePointerCapture(current.id);
     active.current = null; setDragging(false);
-    if (wasDrag) { suppressClick.current = true; window.setTimeout(() => { suppressClick.current=false; }, 300); void bridge.endOverlayDrag(!canceled && Boolean((event?.target as HTMLElement | undefined)?.closest('.overlay-hit')), window.matchMedia('(prefers-reduced-motion: reduce)').matches); }
+    const hasHit = !canceled && Boolean((event?.target as HTMLElement | undefined)?.closest('.overlay-hit'));
+    if (wasDrag) { suppressClick.current = true; window.setTimeout(() => { suppressClick.current=false; }, 300); void bridge.endOverlayDrag(hasHit, window.matchMedia('(prefers-reduced-motion: reduce)').matches); }
+    else void bridge.setOverlayPointerCapture(false, hasHit);
   }, [bridge, flush, onClick]);
   useEffect(() => { const blur = () => finish(undefined, true); window.addEventListener('blur', blur); return () => window.removeEventListener('blur', blur); }, [finish]);
   const onPointerDown = (event: ReactPointerEvent<HTMLElement>) => {
     if (event.button !== 0 || (event.target as HTMLElement).closest('.no-drag')) return;
     event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId);
     active.current = { id:event.pointerId, x:event.screenX, y:event.screenY, lastX:event.screenX, lastY:event.screenY, moved:false, frame:null, dx:0, dy:0, target:event.currentTarget };
-    void bridge.setOverlayHitRegions(true);
+    void bridge.setOverlayPointerCapture(true, true);
   };
   const onPointerMove = (event: ReactPointerEvent<HTMLElement>) => {
     const current = active.current; if (!current || current.id !== event.pointerId) return;

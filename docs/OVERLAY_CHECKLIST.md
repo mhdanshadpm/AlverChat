@@ -39,6 +39,7 @@ The menu route provides Open Quick chats, Open AlverChat, Reset icon position, a
 - [x] Drag moves are batched through `requestAnimationFrame`; native position changes use monitor scale factors.
 - [x] Position is stored per monitor name, edge, and vertical percentage and restored at startup; a missing monitor falls back to the primary display.
 - [x] Dock and compact panel use the same pointer-capture drag hook; compact header controls/search/tabs are excluded from the drag handle.
+- [x] Native click-through stays disabled from pointer-down through pointer-up/cancel, including before the 4 px drag threshold.
 - [x] Reset is available in Settings, the dock context menu, and tray menu.
 - [x] Snap animation observes `prefers-reduced-motion`.
 

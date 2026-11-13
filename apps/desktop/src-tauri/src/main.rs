@@ -68,6 +68,7 @@ struct OverlayState {
     preferences: Mutex<OverlayPreferences>,
     preferences_path: PathBuf,
     active_drag: Mutex<Option<String>>,
+    pointer_capture: Mutex<HashMap<String, bool>>,
     compact_detached: Mutex<bool>,
     cursor_capture: Mutex<HashMap<String, bool>>,
 }
@@ -265,6 +266,18 @@ fn set_overlay_hit_regions(window: WebviewWindow, has_hit: bool) -> Result<(), S
     set_window_capture(window.app_handle(), &window, has_hit)
 }
 #[tauri::command]
+fn set_overlay_pointer_capture(
+    window: WebviewWindow,
+    active: bool,
+    has_hit: bool,
+) -> Result<(), String> {
+    let app = window.app_handle();
+    if let Ok(mut pointers) = app.state::<OverlayState>().pointer_capture.lock() {
+        pointers.insert(window.label().to_string(), active);
+    }
+    set_window_capture(app, &window, active || has_hit)
+}
+#[tauri::command]
 fn start_overlay_drag(window: WebviewWindow) -> Result<(), String> {
     let app = window.app_handle();
     set_window_capture(app, &window, true)?;
@@ -311,6 +324,9 @@ fn end_overlay_drag(
     let app = window.app_handle();
     if let Ok(mut active) = app.state::<OverlayState>().active_drag.lock() {
         *active = None;
+    }
+    if let Ok(mut pointers) = app.state::<OverlayState>().pointer_capture.lock() {
+        pointers.insert(window.label().to_string(), false);
     }
     if window.label() == "dock" {
         save_and_snap_dock(app, &window, reduce_motion)?;
@@ -489,7 +505,15 @@ fn start_cursor_hit_test(app: AppHandle) {
                         .lock()
                         .map(|active| active.as_deref() == Some(label))
                         .unwrap_or(false);
-                    let capture = dragging || overlay_contains_cursor(&app, &window, cursor);
+                    let pointer_active = app
+                        .state::<OverlayState>()
+                        .pointer_capture
+                        .lock()
+                        .map(|pointers| pointers.get(label).copied().unwrap_or(false))
+                        .unwrap_or(false);
+                    let capture = dragging
+                        || pointer_active
+                        || overlay_contains_cursor(&app, &window, cursor);
                     let _ = set_window_capture(&app, &window, capture);
                 }
             }
@@ -994,6 +1018,7 @@ fn main() {
                 preferences: Mutex::new(preferences),
                 preferences_path,
                 active_drag: Mutex::new(None),
+                pointer_capture: Mutex::new(HashMap::new()),
                 compact_detached: Mutex::new(false),
                 cursor_capture: Mutex::new(HashMap::new()),
             });
@@ -1085,6 +1110,7 @@ fn main() {
             hide_compact,
             open_full_app,
             set_overlay_hit_regions,
+            set_overlay_pointer_capture,
             start_overlay_drag,
             move_overlay_by,
             end_overlay_drag,

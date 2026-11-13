@@ -12,6 +12,7 @@ export interface PlatformBridge {
   hideCompact(): Promise<void>;
   openFullApp(chatId?:string): Promise<void>;
   setOverlayHitRegions(hasHit:boolean): Promise<void>;
+  setOverlayPointerCapture(active:boolean,hasHit:boolean): Promise<void>;
   startOverlayDrag(): Promise<void>;
   moveOverlayBy(deltaX:number,deltaY:number): Promise<void>;
   endOverlayDrag(hasHit:boolean,reduceMotion:boolean): Promise<void>;
@@ -46,6 +47,7 @@ export const mockBridge:PlatformBridge = {
  ,async hideCompact(){/* browser preview */}
  ,async openFullApp(){/* browser preview */}
  ,async setOverlayHitRegions(){/* browser preview */}
+ ,async setOverlayPointerCapture(){/* browser preview */}
  ,async startOverlayDrag(){/* browser preview */}
  ,async moveOverlayBy(){/* browser preview */}
  ,async endOverlayDrag(){/* browser preview */}
