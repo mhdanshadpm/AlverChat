@@ -2,6 +2,7 @@
 
 pub mod crypto;
 pub mod discovery;
+pub mod file_transfer;
 pub mod files;
 pub mod groups;
 pub mod identity;

@@ -338,6 +338,7 @@ pub struct FileAcceptPayload {
 pub struct FileChunkPayload {
     pub transfer_id: Uuid,
     pub index: u64,
+    #[serde(with = "bytes_codec")]
     pub bytes: Vec<u8>,
     #[serde(default)]
     pub last: bool,
@@ -357,6 +358,26 @@ pub struct FileCancelPayload {
     pub transfer_id: Uuid,
     #[serde(default)]
     pub reason: Option<String>,
+}
+
+/// Base64 encoding for raw chunk bytes.
+///
+/// A JSON number array costs up to four characters per byte, so a 40 KiB chunk would
+/// no longer fit one transport frame; base64 keeps it at 1.33.
+mod bytes_codec {
+    use base64::Engine as _;
+    use serde::{de::Error as _, Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&base64::engine::general_purpose::STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        base64::engine::general_purpose::STANDARD
+            .decode(text.as_bytes())
+            .map_err(D::Error::custom)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1240,6 +1261,28 @@ mod tests {
     }
 
     #[test]
+    fn a_full_chunk_rides_exactly_one_transport_frame() {
+        let chunk = Payload::FileChunk(FileChunkPayload {
+            transfer_id: uuid("fd"),
+            index: 0,
+            bytes: vec![0xaa_u8; crate::protocol::MAX_FILE_CHUNK_BYTES],
+            last: true,
+        });
+        let json = chunk.payload_json().unwrap();
+        assert!(
+            json["bytes"].is_string(),
+            "chunk bytes travel base64-encoded, not as a number array"
+        );
+        let bytes = serde_json::to_vec(&envelope(kind::FILE_CHUNK, json)).unwrap();
+        assert!(
+            bytes.len() <= crate::transport::MAX_TRANSPORT_FRAME_BYTES - 16,
+            "a full chunk serializes to {} bytes, over the frame limit",
+            bytes.len()
+        );
+        assert_eq!(decode_payload_frame(&bytes).unwrap(), chunk);
+    }
+
+    #[test]
     fn malformed_or_oversized_payloads_are_ignored_not_fatal() {
         let missing = envelope(kind::MESSAGE, serde_json::json!({"chat_id": "c"}));
         assert_eq!(
@@ -1255,13 +1298,15 @@ mod tests {
             serde_json::json!({ "chat_id": "c", "body": "x".repeat(MAX_BODY_BYTES + 1) }),
         );
         assert!(classify(&oversized).is_ignored());
+        let fat = Payload::FileChunk(FileChunkPayload {
+            transfer_id: uuid("fe"),
+            index: 0,
+            bytes: vec![0_u8; crate::protocol::MAX_FILE_CHUNK_BYTES + 1],
+            last: false,
+        });
         let oversized_chunk = envelope(
             kind::FILE_CHUNK,
-            serde_json::json!({
-                "transfer_id": uuid("fe"),
-                "index": 0,
-                "bytes": vec![0_u8; crate::protocol::MAX_FILE_CHUNK_BYTES + 1],
-            }),
+            fat.payload_json().expect("chunk re-encodes"),
         );
         assert_eq!(
             classify(&oversized_chunk),

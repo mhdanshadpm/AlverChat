@@ -2,14 +2,16 @@
 
 mod commands;
 mod drag;
+mod file_transfer;
 mod platform;
 mod websocket;
 
 use alver_core::{
     discovery::{MdnsDiscovery, PeerBeacon},
     identity::Identity,
+    payloads::kind,
     storage::Store,
-    transport::{initiator_handshake, responder_handshake, RemoteIdentity},
+    transport::{initiator_handshake, responder_handshake, RemoteIdentity, SecureStream},
     Envelope, Hlc, Message, PROTOCOL_VERSION,
 };
 use drag::{Edge, Rect};
@@ -156,6 +158,10 @@ struct OverlayState {
     retrying_peers: Mutex<HashSet<String>>,
     /// When each peer's "typing…" flag lapses, so a dropped frame cannot strand it.
     typing_until: Mutex<HashMap<String, u64>>,
+    /// Live progress of the file transfers this process is driving, by transfer id.
+    transfers: Mutex<HashMap<Uuid, file_transfer::LiveTransfer>>,
+    /// Transfers with a receive driver already running, so two clicks cannot pull twice.
+    pulling: Mutex<HashSet<Uuid>>,
     identity: Arc<Identity>,
     peer_sessions: Arc<AtomicUsize>,
     store: Mutex<Store>,
@@ -439,12 +445,34 @@ fn handle_peer_session(
 
     loop {
         let envelope: Envelope<Value> = session.receive()?;
+        let file_frame = file_transfer::handled_kind(&envelope.kind);
         if envelope.v != PROTOCOL_VERSION
             || envelope.from != remote.peer_id
             || envelope.to != identity.peer_id()
-            || !matches!(envelope.kind.as_str(), "message" | "typing")
+            || (!file_frame && !matches!(envelope.kind.as_str(), "message" | "typing"))
         {
             return Err("incoming message envelope is invalid".into());
+        }
+        if envelope.kind == kind::FILE_OFFER {
+            // The offer carries no bytes; it is stored, receipted, and the pull starts
+            // either now (auto-download) or when the user accepts it.
+            let replies = file_transfer::handle_offer(&app, &remote.peer_id, &envelope)?;
+            let stamp = now_ms();
+            session.send(&receipt_for(&identity, &remote.peer_id, envelope.id, stamp))?;
+            for reply in replies {
+                session.send(&reply)?;
+            }
+            continue;
+        }
+        if envelope.kind == kind::FILE_ACCEPT {
+            // The receiver owns the data connection, so the chunks stream over this very
+            // session until it is done; the loop resumes reading afterwards.
+            file_transfer::push_on_session(&app, &mut session, &remote, &envelope)?;
+            continue;
+        }
+        if envelope.kind == kind::FILE_CANCEL {
+            file_transfer::handle_cancel(&app, &remote.peer_id, &envelope)?;
+            continue;
         }
         if envelope.kind == "typing" {
             let typing = envelope
@@ -600,15 +628,15 @@ fn deliver_envelope(
     Ok(())
 }
 
-/// Handshakes with one beacon, sends a single frame and waits for its receipt.
+/// Handshakes with one beacon and hands the caller an authenticated session.
 ///
-/// The beacon's published key is the pin: the handshake fails if the peer cannot
-/// prove it owns that identity, so an address spoof on the LAN buys nothing.
-pub(crate) fn send_frame(
+/// The beacon's published key is the pin: the handshake fails if the peer cannot prove it
+/// owns that identity, so an address spoof on the LAN buys nothing. `send_frame` uses this
+/// for its single frame; the file drivers keep the session and stream over it.
+pub(crate) fn open_session(
     app: &AppHandle,
     beacon: &PeerBeacon,
-    envelope: &Envelope<Value>,
-) -> Result<(), String> {
+) -> Result<SecureStream<websocket::BlockingWebSocket>, String> {
     let state = app.state::<OverlayState>();
     let expected = RemoteIdentity {
         peer_id: beacon.peer_id.clone(),
@@ -616,19 +644,30 @@ pub(crate) fn send_frame(
     };
     let stream = connect_to_peer(beacon)?;
     let stream = websocket::connect(stream, &expected.peer_id, expected.public_key)?;
-    let mut session = initiator_handshake(stream, &state.identity, &expected)?;
+    let session = initiator_handshake(stream, &state.identity, &expected)?;
     state
         .store
         .lock()
         .map_err(|_| "message store lock poisoned")?
         .trust_peer(&expected.peer_id, &expected.public_key)?;
+    Ok(session)
+}
+
+/// Handshakes with one beacon, sends a single frame and waits for its receipt.
+pub(crate) fn send_frame(
+    app: &AppHandle,
+    beacon: &PeerBeacon,
+    envelope: &Envelope<Value>,
+) -> Result<(), String> {
+    let my_id = app.state::<OverlayState>().identity.peer_id();
+    let mut session = open_session(app, beacon)?;
     session.send(envelope)?;
     let receipt: Envelope<Value> = session.receive()?;
     let frame_id = envelope.id.to_string();
     if receipt.v != PROTOCOL_VERSION
         || receipt.kind != "receipt"
-        || receipt.from != expected.peer_id
-        || receipt.to != state.identity.peer_id()
+        || receipt.from != beacon.peer_id
+        || receipt.to != my_id
         || receipt.payload.get("status").and_then(Value::as_str) != Some("delivered")
         || receipt.payload.get("message_id").and_then(Value::as_str) != Some(frame_id.as_str())
     {
@@ -1801,6 +1840,8 @@ fn main() {
                 endpoints: Mutex::new(HashMap::new()),
                 retrying_peers: Mutex::new(HashSet::new()),
                 typing_until: Mutex::new(HashMap::new()),
+                transfers: Mutex::new(HashMap::new()),
+                pulling: Mutex::new(HashSet::new()),
                 identity: identity.clone(),
                 peer_sessions: Arc::new(AtomicUsize::new(0)),
                 store: Mutex::new(store),

@@ -79,8 +79,58 @@ fn sanitize_file_name(name: &str) -> String {
         .collect()
 }
 
+/// The durable on-disk name for one received file: the transfer id pins it to the offer
+/// that produced it, so a re-offer with a different name can never clobber it.
+#[must_use]
+pub fn stored_name(transfer_id: Uuid, file_name: &str) -> String {
+    format!("{transfer_id}-{}", sanitize_file_name(file_name))
+}
+
 fn final_name(offer: &FileOffer) -> String {
-    format!("{}-{}", offer.id, sanitize_file_name(&offer.file_name))
+    stored_name(offer.id, &offer.file_name)
+}
+
+/// Sidecar that records which chunk indices of one transfer are durably on disk.
+#[must_use]
+pub fn resume_index_path(destination_root: &Path, transfer_id: Uuid) -> PathBuf {
+    destination_root.join(format!(".alverchat-{transfer_id}-resume.idx"))
+}
+
+/// Part file holding the bytes received so far for one transfer.
+#[must_use]
+pub fn part_path_for(destination_root: &Path, transfer_id: Uuid) -> PathBuf {
+    destination_root.join(format!(".alverchat-{transfer_id}-resume.part"))
+}
+
+/// How many chunks the resume index claims, and the bytes they cover.
+///
+/// Read-only, so a paused or interrupted transfer can show real progress after a restart
+/// without reopening (and thereby starting) the part file. Records outside the offered
+/// chunk count are ignored, exactly as [`Transfer::load_index`] ignores them.
+#[must_use]
+pub fn resume_progress(destination_root: &Path, transfer_id: Uuid, size: u64) -> (u64, u64) {
+    let total = size.div_ceil(MAX_FILE_CHUNK_BYTES as u64);
+    let Ok(bytes) = fs::read(resume_index_path(destination_root, transfer_id)) else {
+        return (0, 0);
+    };
+    let mut verified = std::collections::HashSet::new();
+    for record in bytes.as_chunks::<INDEX_RECORD_BYTES>().0 {
+        let index = u64::from_le_bytes(*record);
+        if index < total {
+            verified.insert(index);
+        }
+    }
+    let covered = verified
+        .iter()
+        .filter_map(|index| expected_chunk_len(size, total, *index))
+        .sum::<usize>() as u64;
+    (verified.len() as u64, covered)
+}
+
+/// The hash an offer must carry for `bytes`, so sender and receiver agree on one value.
+#[must_use]
+pub fn hash_bytes(bytes: &[u8]) -> [u8; 32] {
+    *blake3::hash(bytes).as_bytes()
 }
 
 fn hash_file(file: &mut File) -> Result<[u8; 32], String> {
@@ -297,14 +347,14 @@ impl Transfer {
         if !root.is_dir() {
             return Err("download destination is not a directory".into());
         }
-        let prefix = format!(".alverchat-{}-resume", offer.id);
+        let transfer_id = offer.id;
         Ok(Self {
             offer,
             policy,
             state: TransferState::Idle,
             reason: None,
-            part_path: root.join(format!("{prefix}.part")),
-            index_path: root.join(format!("{prefix}.idx")),
+            part_path: part_path_for(&root, transfer_id),
+            index_path: resume_index_path(&root, transfer_id),
             destination_root: root,
             file: None,
             received: BTreeSet::new(),
@@ -1171,6 +1221,51 @@ mod tests {
         revived.write_chunk(0, chunk_of(&contents, 0)).unwrap();
         revived.write_chunk(1, chunk_of(&contents, 1)).unwrap();
         assert!(revived.finish().is_ok());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resume_progress_reads_the_index_without_reopening_the_transfer() {
+        let root = temp_dir();
+        let contents = multi_chunk_payload(3);
+        let offer = offer_for(&contents, "progress.bin");
+        let full = MAX_FILE_CHUNK_BYTES as u64;
+
+        // Nothing received yet: no index, no progress.
+        assert_eq!(resume_progress(&root, offer.id, offer.size), (0, 0));
+
+        let mut transfer =
+            Transfer::incoming(&root, offer.clone(), TransferPolicy::default()).unwrap();
+        transfer.receive_offer().unwrap();
+        transfer.begin().unwrap();
+        for index in [0, 2] {
+            transfer
+                .write_chunk(index, chunk_of(&contents, index))
+                .unwrap();
+        }
+        assert_eq!(
+            resume_progress(&root, offer.id, offer.size),
+            (2, full * 2),
+            "the index is the source of truth"
+        );
+        transfer.pause().unwrap();
+        assert_eq!(
+            resume_progress(&root, offer.id, offer.size),
+            (2, full * 2),
+            "a pause keeps the accounting"
+        );
+
+        // A record pointing past the end of the file is ignored, not counted.
+        let index_path = resume_index_path(&root, offer.id);
+        let mut sidecar = OpenOptions::new().append(true).open(&index_path).unwrap();
+        sidecar.write_all(&9_u64.to_le_bytes()).unwrap();
+        // A duplicate record of a chunk already counted is not double-counted.
+        sidecar.write_all(&0_u64.to_le_bytes()).unwrap();
+        drop(sidecar);
+        assert_eq!(resume_progress(&root, offer.id, offer.size).0, 2);
+
+        transfer.cancel().unwrap();
+        assert_eq!(resume_progress(&root, offer.id, offer.size), (0, 0));
         fs::remove_dir_all(root).unwrap();
     }
 

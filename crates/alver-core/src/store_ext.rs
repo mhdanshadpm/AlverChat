@@ -197,6 +197,23 @@ fn from_ms(value: i64) -> u64 {
     value.max(0) as u64
 }
 
+/// Row mapper for every attachment query in this file.
+fn attachment_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Attachment> {
+    let message_id: Option<String> = row.get(2)?;
+    let status: String = row.get(6)?;
+    let hash: Vec<u8> = row.get(5)?;
+    Ok(Attachment {
+        id: uuid_from(row, 0)?,
+        chat_id: row.get(1)?,
+        message_id: message_id.and_then(|raw| Uuid::parse_str(&raw).ok()),
+        file_name: row.get(3)?,
+        size_bytes: from_ms(row.get::<_, i64>(4)?),
+        blake3_hash: <[u8; 32]>::try_from(hash.as_slice()).ok(),
+        state: TransferState::parse(&status).unwrap_or(TransferState::Failed),
+        updated_ms: from_ms(row.get::<_, i64>(7)?),
+    })
+}
+
 fn uuid_from(row: &rusqlite::Row<'_>, column: usize) -> rusqlite::Result<Uuid> {
     let raw: String = row.get(column)?;
     Uuid::parse_str(&raw).map_err(|error| {
@@ -675,24 +692,32 @@ impl Store {
             .prepare("SELECT id, chat_id, message_id, file_name, size_bytes, blake3_hash, status, updated_ms FROM attachments WHERE chat_id = ?1 ORDER BY updated_ms, id")
             .map_err(|error| error.to_string())?;
         let rows = statement
-            .query_map(params![chat_id], |row| {
-                let message_id: Option<String> = row.get(2)?;
-                let status: String = row.get(6)?;
-                let hash: Vec<u8> = row.get(5)?;
-                Ok(Attachment {
-                    id: uuid_from(row, 0)?,
-                    chat_id: row.get(1)?,
-                    message_id: message_id.and_then(|raw| Uuid::parse_str(&raw).ok()),
-                    file_name: row.get(3)?,
-                    size_bytes: from_ms(row.get::<_, i64>(4)?),
-                    blake3_hash: <[u8; 32]>::try_from(hash.as_slice()).ok(),
-                    state: TransferState::parse(&status).unwrap_or(TransferState::Failed),
-                    updated_ms: from_ms(row.get::<_, i64>(7)?),
-                })
-            })
+            .query_map(params![chat_id], attachment_from_row)
             .map_err(|error| error.to_string())?;
         rows.map(|row| row.map_err(|error| error.to_string()))
             .collect()
+    }
+
+    /// One attachment by id — the id doubles as the transfer id.
+    pub fn attachment(&self, id: Uuid) -> Result<Option<Attachment>, String> {
+        self.attachment_by("id", &id.to_string())
+    }
+
+    /// The attachment carried by one message, when the message has a file.
+    pub fn attachment_for_message(&self, message_id: Uuid) -> Result<Option<Attachment>, String> {
+        self.attachment_by("message_id", &message_id.to_string())
+    }
+
+    fn attachment_by(&self, column: &str, value: &str) -> Result<Option<Attachment>, String> {
+        // `column` is only ever one of the two literals above, never caller text.
+        let sql = format!(
+            "SELECT id, chat_id, message_id, file_name, size_bytes, blake3_hash, status, updated_ms \
+             FROM attachments WHERE {column} = ?1"
+        );
+        self.connection
+            .query_row(&sql, params![value], attachment_from_row)
+            .optional()
+            .map_err(|error| error.to_string())
     }
 
     /// Stores an announcement; false when it is already recorded.

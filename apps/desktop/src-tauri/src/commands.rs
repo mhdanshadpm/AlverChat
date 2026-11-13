@@ -22,15 +22,16 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_opener::OpenerExt;
 use uuid::Uuid;
 
 use crate::{
-    deliver_envelope, now_ms, platform, publish, send_frame, start_outbox_retry, MessageDto,
-    OverlayState,
+    deliver_envelope, file_transfer, now_ms, platform, publish, send_frame, start_outbox_retry,
+    MessageDto, OverlayState,
 };
 
 /// The sender id the desktop shell writes for its own messages, edits and deletes.
-const ME: &str = "local";
+pub(crate) const ME: &str = "local";
 
 /// Settings rows this module owns, keyed by group id.
 mod key {
@@ -223,6 +224,15 @@ fn message_dto(
     unread: &HashSet<Uuid>,
 ) -> Result<MessageDto, String> {
     let mine = message.sender == ME;
+    // The transfer id doubles as the message id on every row this app writes, so the file
+    // card is found by primary key instead of scanning attachments by message. A tombstone
+    // hides the card as well, since its bytes are gone from the chat.
+    let file = if message.tombstone {
+        None
+    } else {
+        guard.attachment(message.id)?
+    };
+    let has_file = file.is_some();
     Ok(MessageDto {
         id: message.id.to_string(),
         sender: message.sender.clone(),
@@ -238,10 +248,12 @@ fn message_dto(
         read: mine || !unread.contains(&message.id),
         kind: if message.tombstone {
             "deleted".into()
+        } else if has_file {
+            "file".into()
         } else {
             "text".into()
         },
-        file_name: None,
+        file_name: file.map(|attachment| attachment.file_name),
         timestamp_ms: message.clock.physical_ms,
         reply_to: replies.get(&message.id).map(Uuid::to_string),
         delivery_status: if mine && guard.is_message_pending(message.id)? {
@@ -364,7 +376,7 @@ pub(crate) fn send_message(
 }
 
 /// Drains the outbox of one reachable peer; a failure hands the peer to the retry loop.
-fn flush_outbox(app: &AppHandle, chat_id: &str, beacon: &PeerBeacon) {
+pub(crate) fn flush_outbox(app: &AppHandle, chat_id: &str, beacon: &PeerBeacon) {
     let Ok(pending) = store(app).and_then(|guard| guard.pending_outbox(chat_id)) else {
         return;
     };
@@ -454,11 +466,20 @@ fn media_kind(file_name: &str) -> (&'static str, &'static str) {
 }
 
 /// The bridge state word for one stored transfer state.
-fn transfer_state(state: TransferState) -> &'static str {
+///
+/// Direction is not in the state, only in whose message it is, so the same
+/// `transferring` reads as an upload on my bubble and a download on the peer's.
+fn transfer_state(state: TransferState, mine: bool) -> &'static str {
     match state {
         TransferState::Idle => "idle",
         TransferState::Offered | TransferState::Accepted => "queued",
-        TransferState::Transferring => "downloading",
+        TransferState::Transferring => {
+            if mine {
+                "uploading"
+            } else {
+                "downloading"
+            }
+        }
         TransferState::Paused => "paused",
         TransferState::Completed => "done",
         TransferState::Failed => "failed",
@@ -466,7 +487,11 @@ fn transfer_state(state: TransferState) -> &'static str {
     }
 }
 
-fn attachment_dto(attachment: &store_ext::Attachment) -> AttachmentDto {
+fn attachment_dto(
+    app: &AppHandle,
+    attachment: &store_ext::Attachment,
+    mine: bool,
+) -> AttachmentDto {
     let (kind, mime) = media_kind(&attachment.file_name);
     AttachmentDto {
         id: attachment.id.to_string(),
@@ -476,13 +501,9 @@ fn attachment_dto(attachment: &store_ext::Attachment) -> AttachmentDto {
         name: attachment.file_name.clone(),
         bytes: attachment.size_bytes,
         mime,
-        state: transfer_state(attachment.state),
-        // No transfer engine runs yet, so nothing claims progress beyond "started".
-        progress: if attachment.state == TransferState::Completed {
-            None
-        } else {
-            Some(0.0)
-        },
+        state: transfer_state(attachment.state, mine),
+        // A rate needs a sampled window; the drivers report bytes, not speed.
+        progress: file_transfer::progress(app, attachment, mine),
         transfer_rate_bytes_per_second: 0,
     }
 }
@@ -969,16 +990,34 @@ pub(crate) fn attachments_for(
     chat_id: String,
 ) -> Result<Vec<AttachmentDto>, String> {
     let chat_id = parse_chat(&chat_id)?;
-    let guard = store(&app)?;
-    Ok(guard
-        .attachments_for_chat(&chat_id)?
-        .iter()
-        .map(attachment_dto)
-        .collect())
+    let attachments = store(&app)?.attachments_for_chat(&chat_id)?;
+    let mut out = Vec::with_capacity(attachments.len());
+    for attachment in &attachments {
+        let mine = file_transfer::is_outgoing(&app, attachment)?;
+        out.push(attachment_dto(&app, attachment, mine));
+    }
+    Ok(out)
 }
 
+/// Keeps a copy of the file, offers it, and hands the offer to the peer.
+///
+/// The bytes are not sent here: the peer pulls them on its own session, so this returns as
+/// soon as the offer is delivered, with the transfer queued rather than "sent".
 #[tauri::command]
-pub(crate) fn send_file(
+pub(crate) async fn send_file(
+    app: AppHandle,
+    chat_id: String,
+    file_name: String,
+    data_url: String,
+) -> Result<AttachmentDto, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        send_file_blocking(app, chat_id, file_name, data_url)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn send_file_blocking(
     app: AppHandle,
     chat_id: String,
     file_name: String,
@@ -986,31 +1025,54 @@ pub(crate) fn send_file(
 ) -> Result<AttachmentDto, String> {
     let chat_id = parse_chat(&chat_id)?;
     validate_received_file_name(&file_name).map_err(|error| format!("{error:?}"))?;
-    let _ = (app, chat_id, data_url);
-    // Chunked transfer over the encrypted session is not connected, so nothing is stored
-    // and nothing is claimed.
-    Err("File transfer is unavailable until LAN file chunks are connected.".into())
+    let max_bytes = file_transfer::policy(&app).max_file_bytes;
+    let bytes = file_transfer::decode_data_url(&data_url, max_bytes)?;
+    let beacon = file_transfer::require_peer(&app, &chat_id)?;
+    let attachment = file_transfer::stage_outgoing(&app, &chat_id, &file_name, &bytes)?;
+    flush_outbox(&app, &chat_id, &beacon);
+    publish(&app);
+    Ok(attachment_dto(&app, &attachment, true))
 }
 
 #[tauri::command]
-pub(crate) fn control_transfer(
+pub(crate) async fn control_transfer(
+    app: AppHandle,
+    attachment_id: String,
+    action: String,
+) -> Result<Option<AttachmentDto>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        control_transfer_blocking(app, attachment_id, action)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn control_transfer_blocking(
     app: AppHandle,
     attachment_id: String,
     action: String,
 ) -> Result<Option<AttachmentDto>, String> {
     let id = parse_id(&attachment_id, "Attachment id")?;
-    let _ = (app, id, action);
-    Err("File transfer is unavailable until LAN file chunks are connected.".into())
+    file_transfer::control(&app, id, action.trim())?;
+    let attachment = file_transfer::row_now(&app, id)?;
+    let mine = file_transfer::is_outgoing(&app, &attachment)?;
+    Ok(Some(attachment_dto(&app, &attachment, mine)))
 }
 
+/// Opens the file with the system's default handler once its bytes are here.
 #[tauri::command]
 pub(crate) fn open_attachment(
     app: AppHandle,
     attachment_id: String,
 ) -> Result<Option<String>, String> {
     let id = parse_id(&attachment_id, "Attachment id")?;
-    let _ = (app, id);
-    Err("File transfer is unavailable until LAN file chunks are connected.".into())
+    let attachment = file_transfer::row_now(&app, id)?;
+    let path = file_transfer::file_path(&app, &attachment)?;
+    let opened = path.to_string_lossy().into_owned();
+    app.opener()
+        .open_path(&opened, None::<String>)
+        .map_err(|error| format!("Cannot open the file: {error}"))?;
+    Ok(Some(opened))
 }
 
 // ------------------------------------------------------------------------------------

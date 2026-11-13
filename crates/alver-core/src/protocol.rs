@@ -3,7 +3,12 @@ use serde_json::Value;
 use crate::{Envelope, PROTOCOL_VERSION};
 
 pub const MAX_CONTROL_FRAME_BYTES: usize = 1_048_576;
-pub const MAX_FILE_CHUNK_BYTES: usize = 64 * 1_024;
+/// One file chunk, and the largest body a `file_chunk` frame carries.
+///
+/// A chunk travels base64-encoded inside a JSON envelope, so the whole frame has to fit
+/// the transport's single 64 KiB frame: 40 KiB of bytes expand to 54,616 base64
+/// characters, which leaves room for the envelope and the AEAD tag.
+pub const MAX_FILE_CHUNK_BYTES: usize = 40 * 1024;
 
 const KNOWN_TYPES: &[&str] = &[
     "hello",

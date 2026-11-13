@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import packageJson from '../../../../package.json';
 import { placeContextMenu } from '../menu';
 import {
   CHORD_MODIFIERS,
@@ -569,7 +570,8 @@ describe('SettingsScreen helpers', () => {
       'about',
     ]);
     expect(Object.keys(CATEGORY_ICONS).sort()).toEqual([...CATEGORY_ORDER].sort());
-    expect(APP_VERSION).toBe('0.1.0');
+    // The about panel reads this constant, so it has to follow the release version.
+    expect(APP_VERSION).toBe(packageJson.version);
   });
 
   it('formats slider read-outs', () => {
