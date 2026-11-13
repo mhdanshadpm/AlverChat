@@ -4,6 +4,7 @@ mod commands;
 mod drag;
 mod file_transfer;
 mod platform;
+mod secrets;
 mod websocket;
 
 use alver_core::{
@@ -737,14 +738,66 @@ fn start_outbox_retry(app: AppHandle, beacon: PeerBeacon) {
     }
 }
 
-fn start_peer_discovery(app: AppHandle, identity: Arc<Identity>, port: u16) -> Result<(), String> {
+/// Discovery handle kept in managed state so a settings change (display name)
+/// can re-sign and re-announce the beacon without restarting the app.
+struct DiscoveryState {
+    mdns: MdnsDiscovery,
+    identity: Arc<Identity>,
+    host: String,
+    port: u16,
+}
+
+/// The name advertised to peers: the configured display name when set,
+/// otherwise a stable fallback derived from the peer id.
+fn advertised_display_name(app: &AppHandle, identity: &Identity) -> String {
+    let custom = app
+        .try_state::<platform::SettingsState>()
+        .map(|state| state.snapshot().display_name)
+        .unwrap_or_default();
+    let trimmed = custom.trim();
+    if trimmed.is_empty() {
+        format!("AlverChat {}", &identity.peer_id()[..8])
+    } else {
+        // The beacon signature caps names at 128 bytes; keep a safe margin.
+        trimmed.chars().take(120).collect()
+    }
+}
+
+pub(crate) fn republish_lan_beacon(app: &AppHandle) {
+    let Some(discovery) = app.try_state::<DiscoveryState>() else {
+        return;
+    };
+    let name = advertised_display_name(app, &discovery.identity);
+    let beacon = PeerBeacon::signed(
+        &discovery.identity,
+        name,
+        discovery.host.clone(),
+        discovery.port,
+    );
+    if let Err(error) = discovery.mdns.publish(&beacon, &[]) {
+        eprintln!("Could not republish LAN announcement: {error}");
+    }
+}
+
+fn start_peer_discovery(
+    app: &mut tauri::App,
+    identity: Arc<Identity>,
+    port: u16,
+) -> Result<(), String> {
     let mdns = MdnsDiscovery::new()?;
     let host = format!("alverchat-{}.local.", &identity.peer_id()[..12]);
-    let display_name = format!("AlverChat {}", &identity.peer_id()[..8]);
-    let beacon = PeerBeacon::signed(&identity, display_name, host, port);
+    let display_name = advertised_display_name(app.handle(), &identity);
+    let beacon = PeerBeacon::signed(&identity, display_name, host.clone(), port);
     mdns.publish(&beacon, &[])?;
+    app.manage(DiscoveryState {
+        mdns: mdns.clone(),
+        identity: identity.clone(),
+        host,
+        port,
+    });
     let events = mdns.browse()?;
     let self_id = beacon.peer_id.clone();
+    let app = app.handle().clone();
     std::thread::spawn(move || {
         let _daemon = mdns;
         let mut discovered_services = HashMap::<String, String>::new();
@@ -1659,6 +1712,22 @@ fn build_overlay(
     Ok(window)
 }
 
+/// Set the Dock tile from the embedded icon. Dev runs the bare binary without
+/// an .app bundle (no CFBundleIconFile), so the bundle icon never applies there.
+#[cfg(target_os = "macos")]
+fn set_dock_icon() {
+    use objc::{class, msg_send, runtime::Object, sel, sel_impl};
+    const ICON_PNG: &[u8] = include_bytes!("../icons/icon.png");
+    unsafe {
+        let data: *mut Object =
+            msg_send![class!(NSData), dataWithBytes: ICON_PNG.as_ptr() length: ICON_PNG.len()];
+        let image: *mut Object = msg_send![class!(NSImage), alloc];
+        let image: *mut Object = msg_send![image, initWithData: data];
+        let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
+        let _: () = msg_send![app, setApplicationIconImage: image];
+    }
+}
+
 #[cfg(target_os = "macos")]
 #[allow(unexpected_cfgs)]
 fn set_native_overlay_level(window: &WebviewWindow) {
@@ -1706,40 +1775,35 @@ fn set_native_overlay_level(window: &WebviewWindow) {
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn set_native_overlay_level(_window: &WebviewWindow) {}
 
-fn database_key() -> Result<[u8; 32], String> {
-    let entry = keyring::Entry::new(&keychain_service(), "database-encryption-key")
-        .map_err(|error| format!("Cannot access the system credential store: {error}"))?;
-    let secret = match entry.get_secret() {
-        Ok(secret) => secret,
-        Err(keyring::Error::NoEntry) => {
+/// The encrypted message store inside the instance data directory.
+pub(crate) const MESSAGE_DB_FILE: &str = "messages.db";
+
+fn database_key(app: &AppHandle) -> Result<[u8; 32], String> {
+    let secrets = secrets::Secrets::open(app)?;
+    let secret = match secrets.get(secrets::DATABASE_KEY)? {
+        Some(secret) => secret,
+        None => {
             let mut secret = [0u8; 32];
             OsRng.fill_bytes(&mut secret);
-            entry
-                .set_secret(&secret)
-                .map_err(|error| format!("Cannot save the database key securely: {error}"))?;
+            secrets.set(secrets::DATABASE_KEY, &secret)?;
             secret.to_vec()
         }
-        Err(error) => return Err(format!("Cannot read the database key securely: {error}")),
     };
     secret
         .try_into()
         .map_err(|_| "The saved database key has an invalid length.".into())
 }
 
-fn identity_key() -> Result<Identity, String> {
-    let entry = keyring::Entry::new(&keychain_service(), "peer-identity-signing-key")
-        .map_err(|error| format!("Cannot access the system credential store: {error}"))?;
-    let secret = match entry.get_secret() {
-        Ok(secret) => secret,
-        Err(keyring::Error::NoEntry) => {
+fn identity_key(app: &AppHandle) -> Result<Identity, String> {
+    let secrets = secrets::Secrets::open(app)?;
+    let secret = match secrets.get(secrets::IDENTITY_KEY)? {
+        Some(secret) => secret,
+        None => {
             let identity = Identity::generate();
             let secret = identity.secret_bytes();
-            entry
-                .set_secret(&secret)
-                .map_err(|error| format!("Cannot save the peer identity securely: {error}"))?;
+            secrets.set(secrets::IDENTITY_KEY, &secret)?;
             secret.to_vec()
         }
-        Err(error) => return Err(format!("Cannot read the peer identity securely: {error}")),
     };
     let secret: [u8; 32] = secret
         .try_into()
@@ -1750,11 +1814,11 @@ fn identity_key() -> Result<Identity, String> {
 fn open_message_store(app: &AppHandle) -> Result<Store, String> {
     let directory = instance_data_dir(app)?;
     fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-    let path = directory.join("messages.db");
+    let path = directory.join(MESSAGE_DB_FILE);
     let path = path
         .to_str()
         .ok_or("The app data path is not valid UTF-8")?;
-    Store::open(path, &database_key()?)
+    Store::open(path, &database_key(app)?)
 }
 
 /// Label of the running instance. `pnpm dev:peers` gives each copy its own
@@ -1811,6 +1875,8 @@ fn main() {
         ))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            set_dock_icon();
             let settings = platform::load_settings(app.handle());
             app.manage(platform::SettingsState(Arc::new(Mutex::new(
                 settings.clone(),
@@ -1833,7 +1899,7 @@ fn main() {
                 });
             let store = open_message_store(app.handle()).map_err(std::io::Error::other)?;
             let initial_peers = known_peers(&store).map_err(std::io::Error::other)?;
-            let identity = Arc::new(identity_key().map_err(std::io::Error::other)?);
+            let identity = Arc::new(identity_key(app.handle()).map_err(std::io::Error::other)?);
             app.manage(OverlayState {
                 compact_open: Mutex::new(false),
                 peers: Mutex::new(initial_peers),
@@ -1853,7 +1919,7 @@ fn main() {
                 cursor_capture: Mutex::new(HashMap::new()),
             });
             let transport = start_secure_listener(app.handle().clone(), identity.clone())
-                .and_then(|port| start_peer_discovery(app.handle().clone(), identity, port));
+                .and_then(|port| start_peer_discovery(app, identity, port));
             match transport {
                 Ok(()) => {}
                 Err(error) => eprintln!("LAN discovery is unavailable: {error}"),
@@ -2011,6 +2077,7 @@ fn main() {
             commands::send_file,
             commands::control_transfer,
             commands::open_attachment,
+            commands::attachment_data,
             commands::list_groups,
             commands::create_group,
             commands::update_group,

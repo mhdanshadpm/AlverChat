@@ -160,9 +160,11 @@ export interface PlatformBridge {
   deleteChat(chatId:string): Promise<void>;
   attachmentsFor(chatId:string): Promise<Attachment[]>;
   /** `dataUrl` is base64 only for small files; larger transfers stream from disk. */
-  sendFile(chatId:string, fileName:string, dataUrl:string): Promise<Attachment>;
+  sendFile(chatId:string, fileName:string, dataUrl:string, durationMs?:number): Promise<Attachment>;
   controlTransfer(attachmentId:string, action:'pause'|'resume'|'retry'|'cancel'): Promise<Attachment|null>;
   openAttachment(attachmentId:string): Promise<string|null>;
+  /** A completed attachment as a data URL, so voice notes can play inside the app. */
+  attachmentData(attachmentId:string): Promise<string|null>;
   listAnnouncements(groupId:string): Promise<Announcement[]>;
   sendAnnouncement(groupId:string, text:string): Promise<Announcement>;
   acknowledgeAnnouncement(announcementId:string): Promise<Announcement|null>;
@@ -264,6 +266,7 @@ export const emptyBrowserBridge:PlatformBridge = {
  async sendFile(){return unavailable('File transfers')},
  async controlTransfer(){return null},
  async openAttachment(){return null},
+ async attachmentData(){return null},
  async listAnnouncements(){return []},
  async sendAnnouncement(){return unavailable('Announcements')},
  async acknowledgeAnnouncement(){return null},

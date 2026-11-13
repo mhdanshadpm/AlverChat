@@ -131,6 +131,7 @@ pub struct UdpDiscovery {
     socket: UdpSocket,
 }
 
+#[derive(Clone)]
 pub struct MdnsDiscovery {
     daemon: ServiceDaemon,
 }

@@ -365,12 +365,12 @@ export const mockBridge: PlatformBridge = {
     return delay(undefined);
   },
   attachmentsFor: (chatId) => delay(ATTACHMENTS[chatId] ?? []),
-  sendFile: (chatId, fileName, dataUrl) => {
+  sendFile: (chatId, fileName, dataUrl, durationMs) => {
     const kind: Attachment['kind'] = /\.png|\.jpe?g|\.gif|\.webp$/i.test(fileName) ? 'image'
       : /\.mp4|\.mov|\.webm$/i.test(fileName) ? 'video'
       : /\.m4a|\.mp3|\.wav|\.ogg$/i.test(fileName) ? 'audio' : 'file';
     const bytes = Math.max(1, Math.round((dataUrl.length - dataUrl.indexOf(',') - 1) * 0.75)) || 256_000;
-    const created: Attachment = { id: `a-${++seq}`, chatId, kind, name: fileName, bytes, mime: 'application/octet-stream', state: 'uploading', progress: 0.05, transferRateBytesPerSecond: 24_000_000 };
+    const created: Attachment = { id: `a-${++seq}`, chatId, kind, name: fileName, bytes, mime: 'application/octet-stream', state: 'uploading', progress: 0.05, transferRateBytesPerSecond: 24_000_000, durationMs };
     (ATTACHMENTS[chatId] ?? (ATTACHMENTS[chatId] = [])).push(created);
     (CONVERSATIONS[chatId] ?? (CONVERSATIONS[chatId] = [])).push(msg({ id: `file-${seq}`, sender: 'You', text: fileName, mine: true, kind: 'file', fileName, ...at(0), read: true, deliveryStatus: 'delivered' }));
     peers = peers.map(peer => (peer.id === chatId ? { ...peer, preview: fileName, time: time(0) } : peer));
@@ -388,6 +388,7 @@ export const mockBridge: PlatformBridge = {
     return delay(null);
   },
   openAttachment: () => delay(null),
+  attachmentData: () => delay(null),
   listAnnouncements: (groupId) => delay(ANNOUNCEMENTS.filter(item => item.groupId === groupId)),
   sendAnnouncement: (groupId, text) => {
     const created: Announcement = { id: `an-${++seq}`, groupId, author: 'me', authorName: 'You', text, createdMs: Date.now(), acknowledgedBy: [] };

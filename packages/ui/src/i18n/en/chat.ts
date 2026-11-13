@@ -135,6 +135,7 @@ export default {
   send: 'Send',
   recordingFor: 'Recording {{time}} — release to send',
   cancelRecording: 'Cancel recording',
+  sendRecording: 'Send voice note',
   editBannerTitle: 'Edit message',
   editBannerBody: 'Update your message',
   replyBannerTitle: 'Reply to {{name}}',

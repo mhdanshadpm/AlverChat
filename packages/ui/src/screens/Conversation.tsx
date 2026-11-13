@@ -31,6 +31,7 @@ import {
 import { ns, registerNamespace } from '../i18n';
 import chatCatalog from '../i18n/en/chat';
 import { messageTime, type ToastTone } from './shared';
+import { VOICE_SAMPLE_RATE, downsample, mergeSamples, wavBlob } from './voice';
 import './chat.css';
 
 registerNamespace('chat', chatCatalog);
@@ -143,6 +144,15 @@ function readAsDataUrl(blob: Blob): Promise<string> {
   });
 }
 
+type VoiceCapture = {
+  context: AudioContext;
+  source: MediaStreamAudioSourceNode;
+  processor: ScriptProcessorNode;
+  silence: GainNode;
+  stream: MediaStream;
+  sampleRate: number;
+};
+
 export function Conversation({
   bridge,
   peer,
@@ -189,9 +199,10 @@ export function Conversation({
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const pictureInput = useRef<HTMLInputElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
-  const recorderRef = useRef<MediaRecorder | null>(null);
-  const chunksRef = useRef<Blob[]>([]);
+  const recorderRef = useRef<VoiceCapture | null>(null);
+  const chunksRef = useRef<Float32Array[]>([]);
   const tickRef = useRef<number | null>(null);
+  const startedAtRef = useRef(0);
 
   const peerName = peer?.name ?? chatId;
   const isGroup = Boolean(peer?.group);
@@ -516,6 +527,9 @@ export function Conversation({
     [bridge, reload, toast],
   );
 
+  const voiceSource = useCallback((id: string) => bridge.attachmentData(id), [bridge]);
+  const voiceError = useCallback((error: unknown) => toast(String(error), 'danger'), [toast]);
+
   /* ===== voice note ====================================================== */
 
   const stopTimer = useCallback(() => {
@@ -526,52 +540,76 @@ export function Conversation({
   const startRecording = useCallback(async () => {
     if (recordingMs !== null) return;
     setAttachOpen(false);
-    if (typeof MediaRecorder === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+    const AudioContextCtor =
+      window.AudioContext ??
+      (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioContextCtor || !navigator.mediaDevices?.getUserMedia) {
       toast(text('featureSoon', 'This action is unavailable in the current build.'), 'neutral');
       return;
     }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: settings.echoCancellation, noiseSuppression: settings.noiseSuppression },
+        audio: {
+          deviceId: settings.microphone && settings.microphone !== 'default' ? { exact: settings.microphone } : undefined,
+          echoCancellation: settings.echoCancellation,
+          noiseSuppression: settings.noiseSuppression,
+        },
       });
-      const recorder = new MediaRecorder(stream);
+      const context = new AudioContextCtor();
+      await context.resume();
+      const source = context.createMediaStreamSource(stream);
+      const processor = context.createScriptProcessor(4096, 1, 1);
+      // A silent sink keeps the processor pulling samples without echoing the mic.
+      const silence = context.createGain();
+      silence.gain.value = 0;
       chunksRef.current = [];
-      recorder.ondataavailable = event => {
-        if (event.data.size > 0) chunksRef.current.push(event.data);
+      processor.onaudioprocess = event => {
+        chunksRef.current.push(new Float32Array(event.inputBuffer.getChannelData(0)));
       };
-      recorder.start();
-      recorderRef.current = recorder;
+      source.connect(processor);
+      processor.connect(silence);
+      silence.connect(context.destination);
+      recorderRef.current = { context, source, processor, silence, stream, sampleRate: context.sampleRate };
       const started = Date.now();
+      startedAtRef.current = started;
       setRecordingMs(0);
       stopTimer();
       tickRef.current = window.setInterval(() => setRecordingMs(Date.now() - started), 200);
     } catch {
       toast(text('micDenied', 'Microphone access is off, so voice notes cannot be recorded.'), 'danger');
     }
-  }, [recordingMs, settings.echoCancellation, settings.noiseSuppression, stopTimer, toast]);
+  }, [recordingMs, settings.echoCancellation, settings.microphone, settings.noiseSuppression, stopTimer, toast]);
 
   const stopRecording = useCallback(
     async (cancel: boolean) => {
-      const recorder = recorderRef.current;
+      const capture = recorderRef.current;
       recorderRef.current = null;
+      const elapsedMs = startedAtRef.current ? Date.now() - startedAtRef.current : 0;
+      startedAtRef.current = 0;
       stopTimer();
       setRecordingMs(null);
-      if (!recorder) return;
-      const stopped = new Promise<void>(resolve => {
-        recorder.onstop = () => resolve();
-      });
-      if (recorder.state !== 'inactive') recorder.stop();
-      recorder.stream.getTracks().forEach(track => track.stop());
-      await stopped;
+      if (!capture) return;
+      capture.processor.onaudioprocess = null;
+      capture.source.disconnect();
+      capture.processor.disconnect();
+      capture.silence.disconnect();
+      capture.stream.getTracks().forEach(track => track.stop());
+      void capture.context.close();
       if (cancel) {
         chunksRef.current = [];
         return;
       }
-      const blob = new Blob(chunksRef.current, { type: recorder.mimeType || 'audio/webm' });
+      const samples = mergeSamples(chunksRef.current);
       chunksRef.current = [];
+      if (samples.length === 0) {
+        toast(text('micDenied', 'Microphone access is off, so voice notes cannot be recorded.'), 'danger');
+        return;
+      }
+      const recordedMs = Math.round((samples.length / capture.sampleRate) * 1000);
+      const blob = wavBlob(downsample(samples, capture.sampleRate, VOICE_SAMPLE_RATE), VOICE_SAMPLE_RATE);
       try {
         const dataUrl = await readAsDataUrl(blob);
-        await bridge.sendFile(chatId, 'voice-note.webm', dataUrl);
+        await bridge.sendFile(chatId, 'voice-note.wav', dataUrl, recordedMs || elapsedMs || undefined);
         await reload();
         requestAnimationFrame(() => jumpToLatest());
       } catch (error) {
@@ -584,7 +622,14 @@ export function Conversation({
   useEffect(() => {
     return () => {
       if (tickRef.current) window.clearInterval(tickRef.current);
-      recorderRef.current?.stream.getTracks().forEach(track => track.stop());
+      const capture = recorderRef.current;
+      if (capture) {
+        capture.source.disconnect();
+        capture.processor.disconnect();
+        capture.silence.disconnect();
+        capture.stream.getTracks().forEach(track => track.stop());
+        void capture.context.close();
+      }
     };
   }, []);
 
@@ -907,6 +952,8 @@ export function Conversation({
                   onReply={() => setReplyTo(row.message)}
                   onSelect={on => toggleSelected(row.message.id, on)}
                   onTransfer={control}
+                  onVoiceError={voiceError}
+                  onVoiceSource={voiceSource}
                   reactions={reactions[row.message.id] ?? []}
                   selected={selected.includes(row.message.id)}
                   starred={starred.includes(row.message.id)}
@@ -955,8 +1002,20 @@ export function Conversation({
               })}
             </span>
             <div className="ac-composer__selection-actions">
-              <IconButton iconSize={16} label={text('cancelRecording', 'Cancel recording')} name="trash" onClick={() => void stopRecording(true)} />
-              <button className="ac-composer__send" onClick={() => void stopRecording(false)} type="button">
+              <button
+                aria-label={text('cancelRecording', 'Cancel recording')}
+                className="ac-composer__send"
+                onClick={() => void stopRecording(true)}
+                type="button"
+              >
+                <Icon name="trash" size={17} />
+              </button>
+              <button
+                aria-label={text('sendRecording', 'Send voice note')}
+                className="ac-composer__send"
+                onClick={() => void stopRecording(false)}
+                type="button"
+              >
                 <Icon name="send" size={17} />
               </button>
             </div>
@@ -1005,7 +1064,12 @@ export function Conversation({
               </button>
             ) : (
               <Tooltip content={text('recordVoice', 'Record a voice note')} delay={200}>
-                <button className="ac-composer__send ac-composer__send--rec" onClick={() => void startRecording()} type="button">
+                <button
+                  aria-label={text('recordVoice', 'Record a voice note')}
+                  className="ac-composer__send ac-composer__send--rec"
+                  onClick={() => void startRecording()}
+                  type="button"
+                >
                   <Icon name="mic" size={17} />
                 </button>
               </Tooltip>
@@ -1177,6 +1241,8 @@ type RowProps = {
   onContextMenu: (point: { x: number; y: number }) => void;
   onTransfer: (id: string, action: 'pause' | 'resume' | 'retry' | 'cancel') => void;
   onOpen: (id: string) => void;
+  onVoiceSource: (id: string) => Promise<string | null>;
+  onVoiceError: (error: unknown) => void;
 };
 
 function MessageRow({
@@ -1197,8 +1263,66 @@ function MessageRow({
   onContextMenu,
   onTransfer,
   onOpen,
+  onVoiceSource,
+  onVoiceError,
 }: RowProps) {
   const variant = variantOf(message, attachment);
+  const [playing, setPlaying] = useState(false);
+  const [playedSeconds, setPlayedSeconds] = useState(0);
+  const [measuredSeconds, setMeasuredSeconds] = useState<number | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  const attachmentId = attachment?.id;
+  // Callbacks stay in refs so a parent re-render cannot tear down a playing note.
+  const sourceRef = useRef(onVoiceSource);
+  sourceRef.current = onVoiceSource;
+  const errorRef = useRef(onVoiceError);
+  errorRef.current = onVoiceError;
+
+  // Loading the bytes on mount keeps the press-to-play path synchronous: WebKit only
+  // starts media from the gesture itself, not from a promise resolved later.
+  useEffect(() => {
+    if (variant !== 'voice' || !attachmentId) return;
+    let live = true;
+    sourceRef
+      .current(attachmentId)
+      .then(source => {
+        if (!live) return;
+        if (!source) {
+          errorRef.current(new Error('The recording is not on this device yet.'));
+          return;
+        }
+        const audio = new Audio(source);
+        audioRef.current = audio;
+        audio.onplay = () => setPlaying(true);
+        audio.onpause = () => setPlaying(false);
+        audio.onended = () => {
+          setPlaying(false);
+          setPlayedSeconds(0);
+        };
+        audio.ontimeupdate = () => setPlayedSeconds(audio.currentTime);
+        audio.onerror = () => errorRef.current(new Error('This recording could not be played.'));
+        audio.onloadedmetadata = () => {
+          if (Number.isFinite(audio.duration) && audio.duration > 0) setMeasuredSeconds(Math.round(audio.duration));
+        };
+      })
+      .catch(error => errorRef.current(error));
+    return () => {
+      live = false;
+      audioRef.current?.pause();
+      audioRef.current = null;
+    };
+  }, [attachmentId, variant]);
+
+  const toggleVoice = useCallback(() => {
+    const audio = audioRef.current;
+    if (!audio) {
+      errorRef.current(new Error('The recording is still loading.'));
+      return;
+    }
+    if (audio.paused) void audio.play().catch(error => errorRef.current(error));
+    else audio.pause();
+  }, []);
   const inputs: ReactionInput[] = reactions.flatMap(tally => tally.peers.map(peerId => ({ emoji: tally.emoji, by: peerId })));
   const quoted = message.replyTo ? byId.get(message.replyTo) : undefined;
   const wrap = { 'data-index': index, ref: wrapRef, style };
@@ -1246,6 +1370,9 @@ function MessageRow({
           onRetry={attachment ? () => void onTransfer(attachment.id, 'retry') : undefined}
           onResume={attachment ? () => void onTransfer(attachment.id, 'resume') : undefined}
           onSelectedChange={onSelect}
+          onTogglePlay={variant === 'voice' ? () => void toggleVoice() : undefined}
+          playedSeconds={playing ? Math.floor(playedSeconds) : 0}
+          playing={playing}
           reactions={inputs}
           reply={quoted ? { sender: quoted.sender, text: quoted.text } : undefined}
           selected={selected}
@@ -1261,7 +1388,7 @@ function MessageRow({
               : Math.round(attachment.progress * attachment.bytes)
           }
           variant={variant}
-          voiceSeconds={attachment?.durationMs ? Math.round(attachment.durationMs / 1000) : undefined}
+          voiceSeconds={attachment?.durationMs ? Math.round(attachment.durationMs / 1000) : measuredSeconds ?? undefined}
           waveformSeed={attachment?.id ?? message.id}
         />
         {starred ? (

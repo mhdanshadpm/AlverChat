@@ -8,7 +8,7 @@ To enable signed releases in a new GitHub repository:
 
 1. Add the contents of your private Tauri updater key as the `TAURI_SIGNING_PRIVATE_KEY` repository secret. Keep the private key outside the repository and back it up securely; existing installations depend on the matching key.
 2. Optionally set `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` if the private key has a password.
-3. Push a version tag such as `v0.1.1`. GitHub Actions builds the installer and publishes the signed update manifest and artifacts.
+3. Push a version tag such as `v0.1.2`. GitHub Actions builds the installer and publishes the signed update manifest and artifacts.
 
 The updater endpoint is set from the repository name by the release workflow. Replacing or losing the signing key breaks updates for previously installed builds.
 
@@ -22,6 +22,8 @@ pnpm dev
 ```
 
 Desktop development: `pnpm dev:desktop`. Production UI bundle: `pnpm build`. Rust workspace: `cargo build --workspace`.
+
+Every `pnpm dev:desktop` rebuild is a new ad-hoc-signed binary, and macOS asks for the login password before letting it read the keychain items an earlier build created. To develop without that prompt, run `ALVERCHAT_DEV_SECRETS=1 ALVERCHAT_DATA_DIR=/tmp/alverchat-dev pnpm dev:desktop`: the database key and identity then live in `dev-secrets/` files readable only by your user. A database is bound to the key that created it, so each profile stays in one store — the app refuses the mismatch and says how to fix it. Release builds ignore the flag.
 
 Browser mode is only a UI development shell; it has no peer service and rejects message sends. The desktop UI does not seed sample conversations or claim that unsupported features succeeded. See [docs/PROGRESS.md](docs/PROGRESS.md) and [docs/BLOCKERS.md](docs/BLOCKERS.md) for current capability and release status.
 

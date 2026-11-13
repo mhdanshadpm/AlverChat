@@ -39,7 +39,7 @@ import './SettingsScreen.css';
 /* ===== logic ===== */
 
 /** Mirrors the root `package.json` version; the shell shows the same string. */
-export const APP_VERSION = '0.1.1';
+export const APP_VERSION = '0.1.2';
 
 export type SettingsCategory =
   | 'general'

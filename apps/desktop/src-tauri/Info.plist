@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>AlverChat records voice notes and carries voice calls with people on your local network.</string>
+  <key>NSCameraUsageDescription</key>
+  <string>AlverChat turns on your camera only while you are in a video call.</string>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>AlverChat finds and talks to people on your local network. Nothing leaves the LAN.</string>
+  <key>NSBonjourServices</key>
+  <array>
+    <string>_alverchat._tcp</string>
+  </array>
+</dict>
+</plist>

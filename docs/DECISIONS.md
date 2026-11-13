@@ -78,3 +78,11 @@
 - Outgoing bytes stay in `<app-data>/outgoing`, incoming files land in the user's `downloads_dir` (default `<app-data>/downloads`), and the resume sidecar sits beside the part file so a moved folder carries the file and its resume state together. On-disk names come from `stored_name(id, file_name)`, so a peer cannot choose a path or overwrite another transfer.
 - `send_file` takes the file as a base64 data URL and `open_attachment` hands the resolved path to `tauri-plugin-opener`: the picker keeps ownership of file access in the webview, and the shell never invents a filesystem handle.
 
+## Developer secrets without the keychain — 2026-11-14 01:20
+
+- Secrets go through one `secrets::Secrets` store instead of three `keyring::Entry` calls, so the database key, the identity and the LAN passphrase cannot drift into different storage rules.
+- `ALVERCHAT_DEV_SECRETS` swaps the keychain for `0600` files under the instance data directory, but only in debug builds (`cfg!(debug_assertions)`): the macOS prompt is really "this ad-hoc-signed binary is not the one that created the item", and a shipped binary must never be talkable into keeping keys in a file.
+- A profile is refused when its store does not match its database, in both directions, with the fix in the message. Without it the first hatch run fails as "file is not a database" after quietly generating a key, and unsetting the flag afterwards would leave the profile unopenable.
+- The hatch is documented with a scratch `ALVERCHAT_DATA_DIR`, because reusing the real profile is exactly the mismatch the guard refuses; two dev profiles also stop sharing one identity.
+
+

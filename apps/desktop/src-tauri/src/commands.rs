@@ -46,6 +46,11 @@ mod key {
     pub fn left(group_id: &str) -> String {
         format!("group.left.{group_id}")
     }
+
+    /// How long a voice recording runs; the transfer itself carries only bytes.
+    pub fn attachment_duration(attachment_id: &str) -> String {
+        format!("attachment.duration.{attachment_id}")
+    }
 }
 
 // ------------------------------------------------------------------------------------
@@ -104,6 +109,7 @@ pub(crate) struct AttachmentDto {
     state: &'static str,
     progress: Option<f64>,
     transfer_rate_bytes_per_second: u64,
+    duration_ms: Option<u64>,
 }
 
 #[derive(Serialize, Clone)]
@@ -493,6 +499,16 @@ fn attachment_dto(
     mine: bool,
 ) -> AttachmentDto {
     let (kind, mime) = media_kind(&attachment.file_name);
+    let duration_ms = if kind == "audio" {
+        store(app).ok().and_then(|guard| {
+            guard
+                .get_setting::<u64>(&key::attachment_duration(&attachment.id.to_string()))
+                .ok()
+                .flatten()
+        })
+    } else {
+        None
+    };
     AttachmentDto {
         id: attachment.id.to_string(),
         chat_id: attachment.chat_id.clone(),
@@ -505,6 +521,7 @@ fn attachment_dto(
         // A rate needs a sampled window; the drivers report bytes, not speed.
         progress: file_transfer::progress(app, attachment, mine),
         transfer_rate_bytes_per_second: 0,
+        duration_ms,
     }
 }
 
@@ -1009,9 +1026,10 @@ pub(crate) async fn send_file(
     chat_id: String,
     file_name: String,
     data_url: String,
+    duration_ms: Option<u64>,
 ) -> Result<AttachmentDto, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        send_file_blocking(app, chat_id, file_name, data_url)
+        send_file_blocking(app, chat_id, file_name, data_url, duration_ms)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1022,6 +1040,7 @@ fn send_file_blocking(
     chat_id: String,
     file_name: String,
     data_url: String,
+    duration_ms: Option<u64>,
 ) -> Result<AttachmentDto, String> {
     let chat_id = parse_chat(&chat_id)?;
     validate_received_file_name(&file_name).map_err(|error| format!("{error:?}"))?;
@@ -1029,6 +1048,13 @@ fn send_file_blocking(
     let bytes = file_transfer::decode_data_url(&data_url, max_bytes)?;
     let beacon = file_transfer::require_peer(&app, &chat_id)?;
     let attachment = file_transfer::stage_outgoing(&app, &chat_id, &file_name, &bytes)?;
+    if let Some(duration_ms) = duration_ms {
+        store(&app)?.set_setting(
+            &key::attachment_duration(&attachment.id.to_string()),
+            &duration_ms,
+            now_ms(),
+        )?;
+    }
     flush_outbox(&app, &chat_id, &beacon);
     publish(&app);
     Ok(attachment_dto(&app, &attachment, true))
@@ -1073,6 +1099,28 @@ pub(crate) fn open_attachment(
         .open_path(&opened, None::<String>)
         .map_err(|error| format!("Cannot open the file: {error}"))?;
     Ok(Some(opened))
+}
+
+/// The bytes of a downloaded attachment as a data URL, so audio can play inside the bubble.
+#[tauri::command]
+pub(crate) fn attachment_data(
+    app: AppHandle,
+    attachment_id: String,
+) -> Result<Option<String>, String> {
+    /// A voice note is small; the whole file crosses the IPC bridge to reach the webview.
+    const MAX_INLINE_BYTES: u64 = 16 * 1024 * 1024;
+    let id = parse_id(&attachment_id, "Attachment id")?;
+    let attachment = file_transfer::row_now(&app, id)?;
+    if attachment.size_bytes > MAX_INLINE_BYTES {
+        return Err("That recording is too large to play inside the app.".into());
+    }
+    let path = file_transfer::file_path(&app, &attachment)?;
+    let bytes = std::fs::read(&path).map_err(|error| format!("Cannot read the file: {error}"))?;
+    let (_, mime) = media_kind(&attachment.file_name);
+    Ok(Some(format!(
+        "data:{mime};base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    )))
 }
 
 // ------------------------------------------------------------------------------------

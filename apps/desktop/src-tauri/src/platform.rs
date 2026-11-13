@@ -409,6 +409,9 @@ pub fn update_settings(app: AppHandle, patch: AppSettings) -> Result<AppSettings
     if current.launch_at_login != previous.launch_at_login {
         let _ = apply_autostart(&app, current.launch_at_login);
     }
+    if current.display_name != previous.display_name {
+        crate::republish_lan_beacon(&app);
+    }
     Ok(current)
 }
 
@@ -452,20 +455,14 @@ pub fn is_dnd_active(app: AppHandle) -> bool {
 
 #[tauri::command]
 pub fn set_lan_passphrase(app: AppHandle, passphrase: String) -> Result<bool, String> {
-    let entry = keyring::Entry::new(&crate::keychain_service(), PASSPHRASE_ACCOUNT)
-        .map_err(|error| format!("Cannot access the credential store: {error}"))?;
+    if passphrase.len() > 256 {
+        return Err("The LAN passphrase is too long.".into());
+    }
+    let secrets = crate::secrets::Secrets::open(&app)?;
     if passphrase.is_empty() {
-        match entry.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => {}
-            Err(error) => return Err(format!("Cannot clear the passphrase: {error}")),
-        }
+        secrets.delete(PASSPHRASE_ACCOUNT)?;
     } else {
-        if passphrase.len() > 256 {
-            return Err("The LAN passphrase is too long.".into());
-        }
-        entry
-            .set_secret(passphrase.as_bytes())
-            .map_err(|error| format!("Cannot save the passphrase: {error}"))?;
+        secrets.set(PASSPHRASE_ACCOUNT, passphrase.as_bytes())?;
     }
     let state = app.state::<SettingsState>();
     let mut guard = state
@@ -478,10 +475,10 @@ pub fn set_lan_passphrase(app: AppHandle, passphrase: String) -> Result<bool, St
 }
 
 #[tauri::command]
-pub fn has_lan_passphrase() -> bool {
-    keyring::Entry::new(&crate::keychain_service(), PASSPHRASE_ACCOUNT)
-        .and_then(|entry| entry.get_secret())
-        .map(|secret| !secret.is_empty())
+pub fn has_lan_passphrase(app: AppHandle) -> bool {
+    crate::secrets::Secrets::open(&app)
+        .and_then(|secrets| secrets.get(PASSPHRASE_ACCOUNT))
+        .map(|secret| secret.is_some_and(|secret| !secret.is_empty()))
         .unwrap_or(false)
 }
 
