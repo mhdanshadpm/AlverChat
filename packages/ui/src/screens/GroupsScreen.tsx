@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useMemo, useState, type MouseEvent, type ReactNode } from 'react';
-import type { Group, Peer, PlatformBridge } from '../../../bridge/src';
+import type { Announcement, Group, Peer, PlatformBridge } from '../../../bridge/src';
+import {
+  canPostAnnouncement,
+  loadGroupAnnouncements,
+  announcementView,
+  hasAcknowledged,
+  newestFirst,
+} from '../announcements';
 import {
   AVATAR_PALETTE,
   Avatar,
@@ -32,6 +39,7 @@ import {
 import { ns, registerNamespace } from '../i18n';
 import groupsCatalog from '../i18n/en/groups';
 import { ScreenHeader, type ScreenProps, type ToastTone } from './shared';
+import { AnnouncementBanner } from './SystemStates';
 import {
   AVATAR_PREVIEW_SIZES,
   decodeIconSpec,
@@ -52,6 +60,9 @@ const text = ns('groups');
  * ========================================================================== */
 
 const GROUP_NAME_MAX = 50;
+
+/** An announcement is a short notice, so the field caps it well below the wire limit. */
+const ANNOUNCEMENT_MAX = 280;
 
 const GROUP_EMOJIS = ['💼', '🎨', '🚀', '💰', '📚', '⭐', '🔥', '🎯', '🏠', '🎧', '😄', '🌙'];
 
@@ -790,15 +801,125 @@ function ActionTile({
   );
 }
 
+/**
+ * Announcements (spec 7.12): the group posts them, everyone acknowledges them, and
+ * the author watches who has. Admins-only is a setting, not a code path.
+ */
+export function AnnouncementsSection({
+  announcements,
+  adminsOnly,
+  busy,
+  isAdmin,
+  myId,
+  nameOf,
+  onAcknowledge,
+  onPost,
+}: {
+  announcements: readonly Announcement[];
+  adminsOnly: boolean;
+  busy: boolean;
+  isAdmin: boolean;
+  myId?: string | null;
+  nameOf: (id: string) => string;
+  onAcknowledge: (announcement: Announcement) => void;
+  onPost: (body: string) => Promise<void>;
+}) {
+  const [draft, setDraft] = useState('');
+  const allowed = canPostAnnouncement(isAdmin, adminsOnly);
+  const body = draft.trim();
+
+  async function submit() {
+    if (!allowed || body.length === 0 || busy) return;
+    try {
+      await onPost(body);
+      setDraft('');
+    } catch {
+      /* the screen has already said why */
+    }
+  }
+
+  return (
+    <section aria-label={text('announcementsSection', 'Announcements')} className="grp-announce">
+      <div className="grp-announce__compose">
+        <textarea
+          aria-label={text('announcementPlaceholder', 'Write an announcement for this group…')}
+          className="grp-announce__input"
+          disabled={!allowed}
+          maxLength={ANNOUNCEMENT_MAX}
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+              event.preventDefault();
+              void submit();
+            }
+          }}
+          placeholder={text('announcementPlaceholder', 'Write an announcement for this group…')}
+          rows={2}
+          value={draft}
+        />
+        <div className="grp-announce__foot">
+          <span className="grp-announce__count">
+            {allowed
+              ? text('announcementCount', '{{used}}/{{max}} characters', {
+                  max: ANNOUNCEMENT_MAX,
+                  used: draft.length,
+                })
+              : text('announcementLocked', 'Only group admins can post announcements.')}
+          </span>
+          <Button disabled={!allowed || body.length === 0} icon="send" loading={busy} onClick={() => void submit()} size="sm">
+            {text('postAnnouncement', 'Announce')}
+          </Button>
+        </div>
+      </div>
+
+      {announcements.length === 0 ? (
+        <EmptyState
+          compact
+          icon="megaphone"
+          message={text('noAnnouncementsMessage', 'Nothing has been announced to this group yet.')}
+          title={text('noAnnouncementsTitle', 'No announcements')}
+        />
+      ) : (
+        <div className="grp-announce__list">
+          {announcements.map((announcement) => {
+            const view = announcementView(announcement, nameOf, myId);
+            return (
+              <AnnouncementBanner
+                acknowledged={hasAcknowledged(announcement, myId)}
+                acknowledge={view.isMine ? undefined : () => onAcknowledge(announcement)}
+                announcement={view}
+                isSender={view.isMine}
+                key={view.id}
+                meta={
+                  <>
+                    <span>{view.from}</span>
+                    <span aria-hidden>·</span>
+                    <time>{view.at}</time>
+                  </>
+                }
+              />
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
 export function GroupInfoPanel({
   group,
   members,
   media,
   muted,
+  announcements,
   announcementsFromAdminsOnly,
+  busyAnnouncement,
+  myId,
   onClose,
   onOpenChat,
   onMute,
+  onAcknowledgeAnnouncement,
+  onPostAnnouncement,
   onRequestAdd,
   onRequestRename,
   onRequestIcon,
@@ -813,10 +934,15 @@ export function GroupInfoPanel({
   members: readonly MemberView[];
   media: readonly MediaEntry[];
   muted: boolean;
+  announcements: readonly Announcement[];
   announcementsFromAdminsOnly: boolean;
+  busyAnnouncement: boolean;
+  myId?: string | null;
   onClose: () => void;
   onOpenChat: () => void;
   onMute: (next: boolean) => void;
+  onAcknowledgeAnnouncement: (announcement: Announcement) => void;
+  onPostAnnouncement: (body: string) => Promise<void>;
   onRequestAdd: () => void;
   onRequestRename: () => void;
   onRequestIcon: () => void;
@@ -835,6 +961,12 @@ export function GroupInfoPanel({
   const isEveryone = Boolean(group.isEveryone);
   const canManage = Boolean(group.isAdmin) && !isEveryone;
   const needle = query.trim().toLowerCase();
+
+  /** Announcement rows carry peer ids; the roster is the only name table this panel has. */
+  const nameFor = useMemo(() => {
+    const table = new Map(members.map((member) => [member.id, member.name]));
+    return (id: string) => table.get(id) ?? id;
+  }, [members]);
 
   useEffect(() => {
     setOpenSection(null);
@@ -923,6 +1055,17 @@ export function GroupInfoPanel({
         <Icon name="megaphone" size={15} />
         {announcementsFromAdminsOnly ? text('announcementsAdmins', 'Only group admins can post announcements here.') : text('announcementsAll', 'Anyone in the group can post announcements.')}
       </p>
+
+      <AnnouncementsSection
+        adminsOnly={announcementsFromAdminsOnly}
+        announcements={announcements}
+        busy={busyAnnouncement}
+        isAdmin={Boolean(group.isAdmin)}
+        myId={myId}
+        nameOf={nameFor}
+        onAcknowledge={onAcknowledgeAnnouncement}
+        onPost={onPostAnnouncement}
+      />
 
       <div className="grp-actions">
         <ActionTile icon="messageCircle" label={text('actionChat', 'Chat')} onClick={onOpenChat} />
@@ -1120,7 +1263,7 @@ export function GroupInfoPanel({
  * ========================================================================== */
 
 export function GroupsScreen(props: ScreenProps) {
-  const { bridge, peers, settings, identity, toast, go } = props;
+  const { bridge, peers, settings, identity, toast, go, refreshAnnouncements } = props;
   const [groups, setGroups] = useState<readonly Group[] | null>(null);
   const [layout, setLayout] = useState<'grid' | 'list'>('grid');
   const [query, setQuery] = useState('');
@@ -1136,6 +1279,8 @@ export function GroupsScreen(props: ScreenProps) {
   const [busy, setBusy] = useState(false);
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [media, setMedia] = useState<readonly MediaEntry[]>([]);
+  const [announcements, setAnnouncements] = useState<readonly Announcement[]>([]);
+  const [busyAnnouncement, setBusyAnnouncement] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -1179,6 +1324,18 @@ export function GroupsScreen(props: ScreenProps) {
       .catch(() => {
         if (live) setMedia([]);
       });
+    return () => {
+      live = false;
+    };
+  }, [bridge, selected]);
+
+  useEffect(() => {
+    let live = true;
+    setAnnouncements([]);
+    if (!selected) return;
+    void loadGroupAnnouncements(bridge, selected.id).then((items) => {
+      if (live) setAnnouncements(items);
+    });
     return () => {
       live = false;
     };
@@ -1277,6 +1434,39 @@ export function GroupsScreen(props: ScreenProps) {
     } finally {
       setBusy(false);
     }
+  }
+
+  async function postAnnouncement(bodyText: string): Promise<void> {
+    if (!selected) return;
+    const name = selected.name;
+    setBusyAnnouncement(true);
+    try {
+      const created = await bridge.sendAnnouncement(selected.id, bodyText);
+      setAnnouncements((current) => newestFirst([created, ...current]));
+      refreshAnnouncements?.();
+      toast(text('announcementPostedToast', 'Announcement sent to “{{name}}”', { name }), 'success');
+    } catch (cause) {
+      toast(failure(cause), 'danger');
+      // Rethrown so the composer keeps the draft: a refused post is the user's to fix.
+      throw cause;
+    } finally {
+      setBusyAnnouncement(false);
+    }
+  }
+
+  function acknowledgeAnnouncement(announcement: Announcement) {
+    void (async () => {
+      try {
+        const updated = await bridge.acknowledgeAnnouncement(announcement.id);
+        if (updated) {
+          setAnnouncements((current) => current.map((item) => (item.id === updated.id ? updated : item)));
+        }
+        refreshAnnouncements?.();
+        toast(text('announcementAckToast', 'Announcement acknowledged'), 'success');
+      } catch (cause) {
+        toast(failure(cause), 'danger');
+      }
+    })();
   }
 
   let body: ReactNode;
@@ -1394,12 +1584,16 @@ export function GroupsScreen(props: ScreenProps) {
         <section className="grp-main">{body}</section>
         {selected ? (
           <GroupInfoPanel
+            announcements={announcements}
             announcementsFromAdminsOnly={settings.announcementsFromAdminsOnly}
+            busyAnnouncement={busyAnnouncement}
             group={selected}
             media={media}
             members={membersFor(selected)}
             muted={mutedFor(selected)}
+            myId={identity?.peerId}
             onClose={() => setSelectedId(null)}
+            onAcknowledgeAnnouncement={acknowledgeAnnouncement}
             onMakeAdmin={(member) =>
               toast(text('memberRolePending', 'Admin roles move with the next signed group epoch — not wired to the bridge yet.', { name: member.name }), 'neutral')
             }
@@ -1407,6 +1601,7 @@ export function GroupsScreen(props: ScreenProps) {
             onMute={(next) => void toggleMute(selected, next)}
             onOpenChat={() => go('chats', selected.id)}
             onOpenMenu={openMenu}
+            onPostAnnouncement={(bodyText) => postAnnouncement(bodyText)}
             onRemoveMember={(member) => void removeMember(selected, member)}
             onRequestAdd={() => setAddTarget(selected)}
             onRequestDescription={() => {

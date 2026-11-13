@@ -17,6 +17,8 @@ export type ScreenProps = {
   settings: AppSettings;
   /** Optimistic patch; the shell owns persistence through the bridge. */
   patchSettings: (patch: Partial<AppSettings>) => void;
+  /** Call after announcement storage changes, so the shell re-reads its banner. */
+  refreshAnnouncements?: () => void;
   identity: { peerId: string; fingerprint: string } | null;
 };
 

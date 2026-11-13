@@ -24,3 +24,9 @@
 - Playwright is still missing, so Phase 8 screenshots remain blocked; use `?mock=1&scenario=…` for visual review.
 - The LAN passphrase still gates the settings file only; the transport does not enforce an HMAC challenge.
 - Native overlay windows compile and are registered, but were again not visually validated on real macOS or Windows in this session.
+
+## LAN announcements UI (spec 7.12) — 2026-11-13 21:10
+
+- Announcements are stored, posted, listed and acknowledged on this device only. No `announcement` or `announcement_ack` envelope is sent, so a peer never receives a post and remote acknowledgements never arrive; the "Acknowledged by (N)" trail therefore only ever contains this device. This is the same missing group fan-out as group messages, not a UI gap.
+- The dock's persistent announcement bubble beside the floating icon is not wired: the bubble stack is fed by Rust `overlay-state`, which has no announcement channel. The full-width in-app banner is implemented instead, and the trail lives in Group Info.
+- Verified in the browser under `?mock=1` (post, acknowledge, admins-only lock, banner clear on panel ack); pixel comparison against the design boards is still blocked because Playwright is not installed.

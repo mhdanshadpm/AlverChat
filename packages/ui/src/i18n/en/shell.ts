@@ -47,5 +47,7 @@ export default {
   hotkeyFailed: 'The global shortcut {{combo}} could not be registered.',
   peerJoined: '{{name}} joined the network',
   peerLeft: '{{name}} left the network',
+  announcementAcked: 'Announcement acknowledged',
+  openAnnouncementGroup: 'Open group',
   backToChats: 'Back to chats',
 };

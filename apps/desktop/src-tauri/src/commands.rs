@@ -25,7 +25,8 @@ use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
 use crate::{
-    deliver_envelope, now_ms, publish, send_frame, start_outbox_retry, MessageDto, OverlayState,
+    deliver_envelope, now_ms, platform, publish, send_frame, start_outbox_retry, MessageDto,
+    OverlayState,
 };
 
 /// The sender id the desktop shell writes for its own messages, edits and deletes.
@@ -1246,7 +1247,12 @@ pub(crate) fn send_announcement(
             .ok_or("That group does not exist on this device.")?;
         (state.admin.clone(), state.members.clone())
     };
-    let admins_only = guard.announcements_are_admins_only()?;
+    // The live settings are what the user toggles; the stored key is only the
+    // snapshot carried into each announcement row.
+    let admins_only = app
+        .state::<platform::SettingsState>()
+        .snapshot()
+        .announcements_from_admins_only;
     check_announcement_authority(&my_id, &admin, &members, admins_only)
         .map_err(|violation| format!("Announcement refused: {violation:?}"))?;
     let now = now_ms();

@@ -230,6 +230,69 @@
   flex: none;
 }
 
+/* ===== announcements (spec 7.12) ===== */
+
+.grp-announce {
+  display: flex;
+  flex-direction: column;
+  gap: var(--grp-space-3);
+  min-width: 0;
+}
+
+.grp-announce__compose {
+  display: flex;
+  flex-direction: column;
+  gap: var(--grp-space-2);
+  padding: var(--grp-space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--ac-radius-md);
+  background: var(--surface-2);
+}
+
+.grp-announce__input {
+  width: 100%;
+  min-height: 62px;
+  padding: var(--grp-space-2) var(--grp-space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--ac-radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--ac-font-sm);
+  line-height: 1.45;
+  resize: vertical;
+}
+
+.grp-announce__input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.grp-announce__input:disabled {
+  background: var(--surface-3);
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+.grp-announce__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--grp-space-2);
+}
+
+.grp-announce__count {
+  color: var(--muted);
+  font-size: var(--ac-font-xxs);
+}
+
+.grp-announce__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--grp-space-2);
+  min-width: 0;
+}
+
 /* ===== circular action tiles ===== */
 
 .grp-actions {

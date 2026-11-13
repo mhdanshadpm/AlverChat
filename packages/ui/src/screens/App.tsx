@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { APP_NAME, type AppSettings, type Peer } from '../../../bridge/src';
-import { Avatar, EmptyState, Icon, ToastViewport, cx, initialsFor, type IconName, type ToastView } from '../components';
+import { APP_NAME, type Announcement, type AppSettings, type Peer } from '../../../bridge/src';
+import { Avatar, Button, EmptyState, Icon, ToastViewport, cx, initialsFor, type IconName, type ToastView } from '../components';
+import { announcementView, loadPendingAnnouncements } from '../announcements';
 import { ns, registerNamespace } from '../i18n';
 import shellCatalog from '../i18n/en/shell';
 import { CallsScreen } from './CallsScreen';
@@ -12,6 +13,7 @@ import { GroupsScreen } from './GroupsScreen';
 import { OnboardingScreen } from './OnboardingScreen';
 import { PeopleScreen } from './PeopleScreen';
 import { ProfileScreen } from './ProfileScreen';
+import { AnnouncementBanner } from './SystemStates';
 import { SettingsScreen } from './SettingsScreen';
 import { needsOnboarding, useAppBridge, type ScreenProps, type ToastTone, type View } from './shared';
 import './shell.css';
@@ -44,6 +46,8 @@ export default function App() {
   const [toasts, setToasts] = useState<readonly ToastView[]>([]);
   const [avatar, setAvatar] = useState<string | null>(null);
   const [systemDark, setSystemDark] = useState(prefersDark);
+  const [announcements, setAnnouncements] = useState<readonly Announcement[]>([]);
+  const [announcementTick, setAnnouncementTick] = useState(0);
   const searchRef = useRef<HTMLInputElement>(null);
   const activeRef = useRef<string | null>(null);
   activeRef.current = activeChat;
@@ -136,6 +140,72 @@ export default function App() {
 
   const dark = settings.theme === 'dark' || (settings.theme === 'system' && systemDark);
 
+  /* LAN announcements (spec 7.12): the newest one still owed a tap stays on screen. */
+  useEffect(() => {
+    if (!ready) return;
+    let live = true;
+    void loadPendingAnnouncements(bridge, identity?.peerId).then((items) => {
+      if (live) setAnnouncements(items);
+    });
+    return () => {
+      live = false;
+    };
+  }, [announcementTick, bridge, identity?.peerId, ready, revision]);
+
+  const nameOf = useCallback(
+    (id: string) => peers.find((peer) => peer.id === id)?.name ?? id,
+    [peers],
+  );
+
+  function acknowledge(item: Announcement) {
+    void bridge
+      .acknowledgeAnnouncement(item.id)
+      .then(() => {
+        setAnnouncements((current) => current.filter((entry) => entry.id !== item.id));
+        toast(text('announcementAcked', 'Announcement acknowledged'), 'success');
+      })
+      .catch((error: unknown) => toast(String(error), 'danger'));
+  }
+
+  const latestAnnouncement = announcements[0] ?? null;
+  const announcementGroup = latestAnnouncement
+    ? peers.find((peer) => peer.id === latestAnnouncement.groupId)?.name
+    : undefined;
+  const pendingView = latestAnnouncement
+    ? announcementView(latestAnnouncement, nameOf, identity?.peerId, announcementGroup)
+    : null;
+
+  const announcementStrip =
+    pendingView && latestAnnouncement ? (
+      <div className="app-announce">
+        <AnnouncementBanner
+          acknowledge={() => acknowledge(latestAnnouncement)}
+          announcement={pendingView}
+          meta={
+            <>
+              {announcementGroup ? (
+                <>
+                  <span>{announcementGroup}</span>
+                  <span aria-hidden>·</span>
+                </>
+              ) : null}
+              <span>{pendingView.from}</span>
+              <span aria-hidden>·</span>
+              <time>{pendingView.at}</time>
+              <Button
+                icon="messageCircle"
+                onClick={() => go('chats', latestAnnouncement.groupId)}
+                size="sm"
+                variant="ghost"
+              >
+                {text('openAnnouncementGroup', 'Open group')}
+              </Button>
+            </>
+          }
+        />
+      </div>
+    ) : null;
+
   /* ⌘K focuses the list search, ⌘W closes details, and the dev keys are dead in release builds. */
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -167,7 +237,18 @@ export default function App() {
   const unreadTotal = peers.reduce((total, peer) => total + (peer.unread ?? 0), 0);
   const online = peers.filter(peer => peer.online).length;
 
-  const props: ScreenProps = { bridge, view, go, toast, peers, activeChat, settings, patchSettings, identity };
+  const props: ScreenProps = {
+    bridge,
+    view,
+    go,
+    toast,
+    peers,
+    activeChat,
+    settings,
+    patchSettings,
+    refreshAnnouncements: () => setAnnouncementTick((tick) => tick + 1),
+    identity,
+  };
 
   return (
     <main className={cx('app', dark && 'dark', mobileChat && 'mobile-chat')} onContextMenu={event => event.preventDefault()}>
@@ -216,86 +297,89 @@ export default function App() {
         </div>
       </aside>
 
-      <div className="main-area">
-        {view === 'chats' ? (
-          <>
-            <ChatList
-              active={activeChat}
-              bridge={bridge}
-              onNewChat={() => go('people')}
-              onNewGroup={() => go('groups')}
-              onOpenNetwork={() => go('settings')}
-              onPatchSettings={patchSettings}
-              onSelect={id => {
-                setActiveChat(id);
-                setMobileChat(true);
-              }}
-              peers={peers}
-              searchRef={searchRef}
-              settings={settings}
-              toast={toast}
-            />
-            {chat ? (
-              <Conversation
+      <div className="app-stack">
+        {announcementStrip}
+        <div className="main-area">
+          {view === 'chats' ? (
+            <>
+              <ChatList
+                active={activeChat}
                 bridge={bridge}
-                chatId={chat.id}
-                detailsOpen={detailsOpen}
-                key={chat.id}
-                myId={identity?.peerId ?? 'me'}
-                onBack={() => setMobileChat(false)}
-                onCall={() => toast(text('callUnavailable', 'Calls are unavailable until LAN call signaling is connected.'))}
-                onToggleDetails={setDetailsOpen}
-                peers={peers}
-                peer={chat}
-                revision={revision}
-                settings={settings}
-                toast={toast}
-              />
-            ) : (
-              <div className="ac-page__empty">
-                <EmptyState
-                  icon="messageCircle"
-                  message={text('noChatBody', 'Pick someone from the list, or open People to find a peer on this network.')}
-                  title={text('noChatTitle', 'No chat selected')}
-                />
-              </div>
-            )}
-            {detailsOpen && chat ? (
-              <ChatDetails
-                bridge={bridge}
-                chatId={chat.id}
-                identity={identity}
-                key={`details-${chat.id}`}
-                onClose={() => setDetailsOpen(false)}
-                onOpenChat={id => {
+                onNewChat={() => go('people')}
+                onNewGroup={() => go('groups')}
+                onOpenNetwork={() => go('settings')}
+                onPatchSettings={patchSettings}
+                onSelect={id => {
                   setActiveChat(id);
                   setMobileChat(true);
                 }}
-                onPatchSettings={patchSettings}
                 peers={peers}
-                peer={chat}
+                searchRef={searchRef}
                 settings={settings}
                 toast={toast}
               />
-            ) : null}
-          </>
-        ) : (
-          <div className="ac-page">
-            {view === 'onboarding' ? (
-              <OnboardingScreen {...props} />
-            ) : view === 'groups' ? (
-              <GroupsScreen {...props} />
-            ) : view === 'people' ? (
-              <PeopleScreen {...props} />
-            ) : view === 'calls' ? (
-              <CallsScreen {...props} />
-            ) : view === 'profile' ? (
-              <ProfileScreen {...props} />
-            ) : view === 'settings' ? (
-              <SettingsScreen {...props} />
-            ) : null}
-          </div>
-        )}
+              {chat ? (
+                <Conversation
+                  bridge={bridge}
+                  chatId={chat.id}
+                  detailsOpen={detailsOpen}
+                  key={chat.id}
+                  myId={identity?.peerId ?? 'me'}
+                  onBack={() => setMobileChat(false)}
+                  onCall={() => toast(text('callUnavailable', 'Calls are unavailable until LAN call signaling is connected.'))}
+                  onToggleDetails={setDetailsOpen}
+                  peers={peers}
+                  peer={chat}
+                  revision={revision}
+                  settings={settings}
+                  toast={toast}
+                />
+              ) : (
+                <div className="ac-page__empty">
+                  <EmptyState
+                    icon="messageCircle"
+                    message={text('noChatBody', 'Pick someone from the list, or open People to find a peer on this network.')}
+                    title={text('noChatTitle', 'No chat selected')}
+                  />
+                </div>
+              )}
+              {detailsOpen && chat ? (
+                <ChatDetails
+                  bridge={bridge}
+                  chatId={chat.id}
+                  identity={identity}
+                  key={`details-${chat.id}`}
+                  onClose={() => setDetailsOpen(false)}
+                  onOpenChat={id => {
+                    setActiveChat(id);
+                    setMobileChat(true);
+                  }}
+                  onPatchSettings={patchSettings}
+                  peers={peers}
+                  peer={chat}
+                  settings={settings}
+                  toast={toast}
+                />
+              ) : null}
+            </>
+          ) : (
+            <div className="ac-page">
+              {view === 'onboarding' ? (
+                <OnboardingScreen {...props} />
+              ) : view === 'groups' ? (
+                <GroupsScreen {...props} />
+              ) : view === 'people' ? (
+                <PeopleScreen {...props} />
+              ) : view === 'calls' ? (
+                <CallsScreen {...props} />
+              ) : view === 'profile' ? (
+                <ProfileScreen {...props} />
+              ) : view === 'settings' ? (
+                <SettingsScreen {...props} />
+              ) : null}
+            </div>
+          )}
+        </div>
       </div>
 
       <ToastViewport onDismiss={id => setToasts(current => current.filter(entry => entry.id !== id))} toasts={toasts} />

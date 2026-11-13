@@ -425,6 +425,8 @@ export type AnnouncementBannerProps = {
   isSender?: boolean;
   /** Already acknowledged: the button becomes a quiet confirmation. */
   acknowledged?: boolean;
+  /** Quiet provenance line — group, author, time — for live data. */
+  meta?: ReactNode;
   onDismiss?: () => void;
   className?: string;
 };
@@ -435,6 +437,7 @@ export function AnnouncementBanner({
   acknowledgedBy,
   isSender = false,
   acknowledged = false,
+  meta,
   onDismiss,
   className,
 }: AnnouncementBannerProps) {
@@ -450,17 +453,18 @@ export function AnnouncementBanner({
               <Icon name="check" size={13} />
               {text('acknowledged', 'Acknowledged')}
             </Badge>
-          ) : (
+          ) : acknowledge ? (
             <Button onClick={acknowledge} size="sm">
               {text('acknowledge', 'Acknowledge')}
             </Button>
-          )
+          ) : undefined
         }
         icon="megaphone"
         inline
         message={announcement.text}
         title={text('announcementTitle', 'LAN Announcement')}
       />
+      {meta ? <div className="ss-announce__meta">{meta}</div> : null}
       {isSender ? (
         <div className="ss-announce__ack">
           <button

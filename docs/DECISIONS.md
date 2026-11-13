@@ -53,3 +53,12 @@
 - `leave_group` only records the local `left` flag. Removing myself from the roster needs the admin's signature, and `GroupState::update_members` refuses with `CannotRemoveAdmin` for the admin themself.
 - Commands, DTOs and the `GroupPatch` input are `pub(crate)` so `generate_handler!` can name them from the crate root, and the store-lock helper uses `State::inner()` to keep the guard borrowed from the app instead of from a temporary.
 - Outgoing messages keep the literal sender id `local` while group and roster authority uses `identity.peer_id()`: switching the message actor would silently orphan existing history for `mine`, edit and tombstone checks.
+
+## LAN announcements UI (spec 7.12) — 2026-11-13 21:10
+
+- The full-width banner lists only announcements that still owe *this device* a tap. My own posts stay out of it and keep their "Acknowledged by (N)" trail in Group Info, because a persistent strip over every screen for a notice I wrote myself would be noise, and the board shows the trail as a sender-side detail under the banner.
+- `send_announcement` now reads `announcementsFromAdminsOnly` from the live `SettingsState` instead of the `announcement.admins_only` store key: settings are persisted to JSON by `platform::persist`, so the DB key could never have been true, and the admins-only toggle in Privacy & Network would have done nothing.
+- Group Info posts and acknowledges through the bridge and then calls a new optional `ScreenProps.refreshAnnouncements`, rather than introducing a shared store (zustand is a dependency but the UI has stayed prop-driven): one callback keeps the shell banner and the panel honest without a new pattern.
+- `AnnouncementsSection` reuses the design-board `AnnouncementBanner` instead of a new component, and the banner gained an optional `meta` slot plus "no action when `acknowledge` is absent", so an author's own row shows no dead Acknowledge button.
+- `packages/ui/src/announcements.ts` owns the id↔name and ms↔stamp conversions, and treats a rejected `listAnnouncements` as an empty group: the bridge has no all-groups call, so the banner is assembled from `listGroups` fan-out and one refusing group must not hide the rest.
+- Announcements are still local-only over the wire — no `announcement` / `announcement_ack` frame is sent, so a peer never sees this device's posts and remote acks never arrive. Same gap as group fan-out, tracked in BLOCKERS.

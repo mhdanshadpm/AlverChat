@@ -219,6 +219,28 @@
   background: linear-gradient(90deg, var(--accent-soft), var(--surface));
 }
 
+.ss-announce__meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 14px;
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: var(--ac-font-xxs);
+  font-weight: 600;
+  min-width: 0;
+}
+
+.ss-announce__meta time {
+  font-variant-numeric: tabular-nums;
+}
+
+.ss-announce__meta button {
+  margin-left: auto;
+}
+
 .ss-announce__ack {
   display: flex;
   align-items: center;

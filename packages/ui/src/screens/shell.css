@@ -23,6 +23,32 @@
   background: var(--surface);
 }
 
+/* The column a full-width LAN announcement sits in, above the panes. */
+.app-stack {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.app-stack > .main-area {
+  height: auto;
+  min-height: 0;
+}
+
+.app-announce {
+  flex: none;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+}
+
+.app-announce .ss-announce {
+  box-shadow: none;
+}
+
 .rail-status-dot--off {
   background: var(--muted);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--muted) 12%, transparent);
