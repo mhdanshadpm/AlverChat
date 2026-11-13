@@ -1,83 +1,304 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { APP_NAME, bridgeForRuntime, emptyBrowserBridge, type ChatMessage, type Peer, type PlatformBridge } from '../../../bridge/src';
-import { Search, MessageCircle, UsersRound, ContactRound, Phone, Settings, Plus, Video, PhoneCall, MoreHorizontal, Pin, Smile, Mic, Send, Sun, Moon, ChevronLeft, Check, CheckCheck, Clock3, FileText, Image, Bell, ShieldCheck, Wifi, X, Sparkles, Copy, Forward, Pencil, Reply, Star, Trash2, Info, ChevronRight, Globe, Camera } from 'lucide-react';
-import { placeContextMenu } from '../menu';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { check } from '@tauri-apps/plugin-updater';
-import { relaunch } from '@tauri-apps/plugin-process';
+import { APP_NAME, type AppSettings, type Peer } from '../../../bridge/src';
+import { Avatar, EmptyState, Icon, ToastViewport, cx, initialsFor, type IconName, type ToastView } from '../components';
+import { ns, registerNamespace } from '../i18n';
+import shellCatalog from '../i18n/en/shell';
+import { CallsScreen } from './CallsScreen';
+import { ChatDetails } from './ChatDetails';
+import { ChatList } from './ChatList';
+import { Conversation } from './Conversation';
+import { GroupsScreen } from './GroupsScreen';
+import { OnboardingScreen } from './OnboardingScreen';
+import { PeopleScreen } from './PeopleScreen';
+import { ProfileScreen } from './ProfileScreen';
+import { SettingsScreen } from './SettingsScreen';
+import { needsOnboarding, useAppBridge, type ScreenProps, type ToastTone, type View } from './shared';
+import './shell.css';
 
-const nav = [ ['Chats',MessageCircle],['Groups',UsersRound],['People',ContactRound],['Calls',Phone],['Settings',Settings] ] as const;
-function Avatar({peer,size='md'}:{peer:Pick<Peer,'initials'|'color'|'online'|'group'>,size?:'sm'|'md'|'lg'}){return <span className={`avatar ${peer.color} ${size} ${peer.group?'group':''}`}>{peer.group?<UsersRound size={size==='sm'?15:20}/>:peer.initials}<i className={peer.online?'online':''}/></span>}
-function messageTime(message:ChatMessage){return message.time|| (message.timestampMs?new Date(message.timestampMs).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'}):'')}
+registerNamespace('shell', shellCatalog);
+const text = ns('shell');
 
-export default function App(){
- const [peers,setPeers]=useState<Peer[]>([]); const [profile,setProfile]=useState(()=>({name:localStorage.getItem('alverchat.profile.name')??'',color:localStorage.getItem('alverchat.profile.color')??'violet'})); const [active,setActive]=useState(''); const [messages,setMessages]=useState<ChatMessage[]>([]); const [bridge,setBridge]=useState<PlatformBridge>(emptyBrowserBridge); const [tab,setTab]=useState(()=>window.location.pathname.endsWith('/welcome')?'Onboarding':window.location.pathname.endsWith('/profile')?'Profile':'Chats'); const [query,setQuery]=useState(''); const [unreadOnly,setUnreadOnly]=useState(false); const [draft,setDraft]=useState(''); const [dark,setDark]=useState(()=>{try{return localStorage.getItem('alverchat.theme')==='dark'}catch{return false}}); const [details,setDetails]=useState(true); const [showAttach,setShowAttach]=useState(false); const [notice,setNotice]=useState(''); const [replyTo,setReplyTo]=useState<ChatMessage|null>(null); const [editingId,setEditingId]=useState<string|null>(null); const [contextMenu,setContextMenu]=useState<{message:ChatMessage;left:number;top:number}|null>(null); const input=useRef<HTMLInputElement>(null); const searchInput=useRef<HTMLInputElement>(null);
- useEffect(()=>{void bridgeForRuntime().then(setBridge)},[]);
- useEffect(()=>{if(!('__TAURI_INTERNALS__' in window))return;let unlisten:(()=>void)|undefined;void listen<string|null>('navigate-chat',event=>{if(event.payload)setActive(event.payload);setTab('Chats')}).then(stop=>{unlisten=stop});return()=>unlisten?.()},[]);
- useEffect(()=>{if(!('__TAURI_INTERNALS__' in window))return;let unlisten:(()=>void)|undefined;void listen<{peers:Peer[]}>('overlay-state',event=>setPeers(event.payload.peers)).then(stop=>{unlisten=stop});return()=>unlisten?.()},[]);
- useEffect(()=>{if(!('__TAURI_INTERNALS__' in window)||!active)return;let unlisten:(()=>void)|undefined;void listen<string>('messages-changed',event=>{if(event.payload===active)void bridge.listMessages(active).then(setMessages)}).then(stop=>{unlisten=stop});return()=>unlisten?.()},[active,bridge]);
- useEffect(()=>{void bridge.listPeers().then(setPeers)},[bridge]);
- useEffect(()=>{if(!active&&peers.length>0)setActive(peers[0].id)},[active,peers]);
- useEffect(()=>{void bridge.listMessages(active).then(setMessages);if(active){void bridge.markAsRead(active);setPeers(old=>old.map(p=>p.id===active?{...p,unread:undefined}:p))}},[active,bridge]);
- useEffect(()=>{if(!contextMenu)return;const close=(event:KeyboardEvent)=>{if(event.key==='Escape')setContextMenu(null)};window.addEventListener('keydown',close);return()=>window.removeEventListener('keydown',close)},[contextMenu]);
- useEffect(()=>{const shortcuts=(event:KeyboardEvent)=>{if((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==='k'){event.preventDefault();searchInput.current?.focus()}if(import.meta.env.PROD&&((event.key==='F5')||((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==='r')||event.key==='F12'||((event.metaKey||event.ctrlKey)&&event.shiftKey&&event.key.toLowerCase()==='i')))event.preventDefault()};window.addEventListener('keydown',shortcuts);return()=>window.removeEventListener('keydown',shortcuts)},[]);
- const chat=peers.find(p=>p.id===active)??peers[0];
- const visible=useMemo(()=>peers.filter(p=>(tab==='Groups'?p.group:tab==='Chats'?true:tab==='People'?true:true)&&(!unreadOnly||Boolean(p.unread))&&`${p.name} ${p.preview}`.toLowerCase().includes(query.toLowerCase())),[peers,query,tab,unreadOnly]);
- function send(){if(!draft.trim()||!chat)return;if(!chat.online){setNotice('This peer is not currently available on the local network.');window.setTimeout(()=>setNotice(''),3200);return}const text=draft.trim();if(editingId){void bridge.editMessageLocal(editingId,text).then(()=>{setMessages(old=>old.map(m=>m.id===editingId?{...m,text,edited:true}:m));setEditingId(null)}).catch(e=>{setNotice(String(e));window.setTimeout(()=>setNotice(''),3200)})}else{void bridge.sendMessage(chat.id,text).then(m=>setMessages(old=>old.some(existing=>existing.id===m.id)?old:[...old,{...m,replyTo:replyTo?.id}])).catch(error=>{setNotice(String(error));window.setTimeout(()=>setNotice(''),3200)})}setDraft('');setReplyTo(null);input.current?.focus()}
- function changeTheme(next:boolean){setDark(next);try{localStorage.setItem('alverchat.theme',next?'dark':'light')}catch{}}
- function action(name:string){if(/^(Starting (voice|video) call|Voice call$|Video call$|Calling |Choose someone to call)/i.test(name)){setNotice('Calls are unavailable until LAN call signaling is connected.')}else if(/^(Message copied|Message deleted)/.test(name)){setNotice(name)}else{setNotice('This action is unavailable in the current build.')}window.setTimeout(()=>setNotice(''),3200)}
- function messageAction(name:string,message:ChatMessage){setContextMenu(null);if(name==='Reply'){setReplyTo(message);setEditingId(null);input.current?.focus()}else if(name==='Edit'&&message.mine){setEditingId(message.id);setReplyTo(null);setDraft(message.text);input.current?.focus()}else if(name==='Copy'){void navigator.clipboard?.writeText(message.text);action('Message copied')}else if(name==='Delete for me'){void bridge.deleteMessageLocal(message.id).then(()=>{setMessages(old=>old.filter(m=>m.id!==message.id));action('Message deleted for you')}).catch(e=>setNotice(String(e)))}else if(name==='Delete for everyone'&&message.mine){void bridge.deleteMessageLocal(message.id).then(()=>{setMessages(old=>old.map(m=>m.id===message.id?{...m,text:'This message was deleted',kind:'deleted'}:m));action('Message deleted for everyone')}).catch(e=>setNotice(String(e)))}else action(name)}
- async function checkUpdates(){if(!('__TAURI_INTERNALS__' in window)){setNotice('Updates can only be checked in the desktop app.');return}try{const update=await check();if(!update){setNotice('AlverChat is up to date.');return}if(!window.confirm(`AlverChat ${update.version} is available. Download and install it now?`))return;setNotice(`Downloading AlverChat ${update.version}…`);await update.downloadAndInstall();await relaunch()}catch(error){setNotice(`Update check failed: ${String(error)}`)}window.setTimeout(()=>setNotice(''),5000)}
- return <main className={dark?'app dark':'app'} onContextMenu={event=>event.preventDefault()}>
-  <aside className="rail"><button className="brandmark" onClick={()=>setTab('Chats')} aria-label="Open chats"><MessageCircle size={22} fill="currentColor"/><span className="brand-dot">•••</span></button><button className="rail-user" onClick={()=>setTab('Profile')} aria-label="Open my profile"><Avatar peer={{initials:profile.name.trim()?profile.name.trim().split(/\s+/).map(part=>part[0]).join('').slice(0,2).toUpperCase():'?',color:profile.color,online:false,group:false}} size="md"/></button><div className="rail-nav">{nav.map(([label,Icon])=><button key={label} onClick={()=>setTab(label)} className={tab===label?'selected':''} title={label}><Icon size={19}/><span>{label}</span>{label==='Chats'&&peers.some(peer=>peer.unread)&&<b className="rail-count">{peers.reduce((total,peer)=>total+(peer.unread??0),0)}</b>}</button>)}</div><div className="rail-bottom"><button onClick={()=>changeTheme(!dark)} title="Toggle theme">{dark?<Sun size={19}/>:<Moon size={19}/>}</button><div className="network-dot" title="LAN discovery is not connected"/></div></aside>
-  <div className="main-area">
-   {tab==='Chats'?(
-    <>
-     <section className="listpane"><header className="list-head"><div className="title-row"><div><div className="eyebrow">YOUR WORKSPACE</div><h1>Messages</h1></div><button className="iconbtn" onClick={()=>action('Start a new conversation')}><Plus size={19}/></button></div><label className="search"><Search size={16}/><input ref={searchInput} value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search chats, people..."/><kbd>⌘ K</kbd></label><div className="filters"><button className={!unreadOnly?'active':''} onClick={()=>setUnreadOnly(false)}>All <small>{peers.length}</small></button><button className={unreadOnly?'active':''} onClick={()=>setUnreadOnly(true)}>Unread <small>{peers.filter(p=>p.unread).length}</small></button><button onClick={()=>setTab('Groups')}>Groups</button></div></header>
-      <div className="list-scroll">{visible.some(peer=>peer.pinned)&&<div className="section-label">PINNED <span>{visible.filter(peer=>peer.pinned).length}</span></div>}{visible.filter(p=>p.pinned).map(p=><button className={`chat-row ${active===p.id?'active':''}`} key={p.id} onClick={()=>setActive(p.id)}><Avatar peer={p}/><span className="row-copy"><strong>{p.name}</strong><span className={p.typing?'typing':''}>{p.preview}</span></span><span className="row-meta"><time>{p.time}</time>{p.unread&&<b className="unread">{p.unread}</b>}</span></button>)}{visible.some(peer=>!peer.pinned)&&<div className="section-label chats-label">CHATS <span>{visible.filter(peer=>!peer.pinned).length}</span></div>}{visible.filter(p=>p.pinned!==true).map(p=><button className={`chat-row ${active===p.id?'active':''}`} key={p.id} onClick={()=>setActive(p.id)}><Avatar peer={p}/><span className="row-copy"><strong>{p.name}</strong><span className={p.typing?'typing':''}>{p.preview}</span></span><span className="row-meta"><time>{p.time}</time>{p.unread&&<b className="unread">{p.unread}</b>}</span></button>)}{visible.length===0&&<div className="empty-list"><Search size={23}/><strong>{query?'No matches found':'No chats yet'}</strong><span>{query?'Try another name or keyword.':'Chats appear after you connect with someone on your local network.'}</span></div>}</div>
-      <button className="new-chat" onClick={()=>action('New chat')}><Plus size={17}/> New conversation</button>
-      <div className="lan-status"><span className="network-dot"/> {peers.filter(p=>p.online).length?'LAN connected':peers.length?`${peers.length} peer${peers.length===1?'':'s'} discovered`:'Searching LAN'} <b>{peers.filter(p=>p.online).length} ready</b></div>
-     </section>
-     <section className="conversation">{chat?<><header className="conversation-head"><button className="mobile-back"><ChevronLeft/></button><Avatar peer={chat}/><div className="contact-head"><strong>{chat.name}</strong><span><i className={chat.online?'status-dot':''}/>{chat.status}</span></div><div className="head-actions"><button className="iconbtn" onClick={()=>action('Starting voice call…')} title="Voice call"><PhoneCall size={18}/></button><button className="iconbtn" onClick={()=>action('Starting video call…')} title="Video call"><Video size={19}/></button><button className="iconbtn" onClick={()=>setDetails(!details)} title="Chat details"><Search size={18}/></button><button className="iconbtn"><MoreHorizontal size={19}/></button></div></header>
-      <div className="messages">{messages.length===0?<div className="empty-list"><MessageCircle size={23}/><strong>No messages yet</strong><span>Send a message to start this conversation.</span></div>:messages.map(m=><div key={m.id} onContextMenu={event=>{event.preventDefault();const point=placeContextMenu(event.clientX,event.clientY,window.innerWidth,window.innerHeight,220,m.mine?396:356);setContextMenu({message:m,...point})}} className={`message-line ${m.mine?'mine':''}`}><div className="message-avatar">{!m.mine&&<Avatar peer={chat} size="sm"/>}</div><div className={`bubble ${m.mine?'sent':''} ${m.kind==='file'?'file-bubble':''} ${m.kind==='deleted'?'deleted':''}`}>{m.kind==='file'?<><span className="file-icon"><FileText size={19}/></span><span><b>{m.fileName||'File'}</b></span></>:<>{!m.mine&&<strong className="sender">{m.sender}</strong>}<span>{m.text}</span>{m.edited&&<i className="edited-tag">edited</i>}</>}<small className="msg-time">{m.deliveryStatus==='pending'?'Waiting for peer':messageTime(m)} {m.mine&&(m.deliveryStatus==='pending'?<Clock3 size={13}/>:<Check size={14}/>)}</small></div></div>)}</div>
-      {contextMenu&&<div className="context-backdrop" onContextMenu={e=>e.preventDefault()} onClick={()=>setContextMenu(null)}><div className="context-menu" role="menu" aria-label="Message actions" style={{left:contextMenu.left,top:contextMenu.top}} onClick={e=>e.stopPropagation()}><div className="context-reactions">{['👍','❤️','😂','😮','🎉'].map(emoji=><button key={emoji} onClick={()=>messageAction(`Reacted ${emoji}`,contextMenu.message)}>{emoji}</button>)}</div>{[Reply,Copy,Pencil,Forward,Pin,Star,Info,Trash2].map((Icon,index)=>{const labels=['Reply','Copy','Edit','Forward','Pin','Star','Message info','Delete for me'];if(index===2&&!contextMenu.message.mine)return null;return <button key={labels[index]} role="menuitem" onClick={()=>messageAction(labels[index],contextMenu.message)}><Icon size={16}/>{labels[index]}<span>{['R','Ctrl+C','Ctrl+E','Ctrl+F','','','Ctrl+I',''][index]}</span></button>})}{contextMenu.message.mine&&<button className="menu-danger" role="menuitem" onClick={()=>messageAction('Delete for everyone',contextMenu.message)}><Trash2 size={16}/>Delete for everyone<span>Ctrl+Del</span></button>}</div></div>}
-      {showAttach&&<div className="attach-menu"><button onClick={()=>action('Choose a photo or video')}><Image size={17}/> Photo or video</button><button onClick={()=>action('Choose a file')}><FileText size={17}/> File or document</button><button onClick={()=>action('Voice note')}><Mic size={17}/> Voice note</button></div>}
-      {(replyTo||editingId)&&<div className="reply-banner"><span><b>{editingId?'Edit message':`Reply to ${replyTo?.sender}`}</b><small>{editingId?'Update your message':replyTo?.text}</small></span><button onClick={()=>{setReplyTo(null);setEditingId(null);setDraft('')}}><X size={15}/></button></div>}
-      <footer className="composer" title={!chat.online?'Peer unavailable on the local network':''}><button className="addbtn" disabled={!chat.online} onClick={()=>setShowAttach(!showAttach)}><Plus size={21}/></button><div className="inputwrap"><input ref={input} disabled={!chat.online} value={draft} onChange={e=>setDraft(e.target.value)} onKeyDown={e=>e.key==='Enter'&&send()} placeholder={editingId?'Edit your message...':chat.online?'Write a message...':'Peer unavailable on the local network'}/><button disabled={!chat.online} onClick={()=>action('Emoji picker')}><Smile size={19}/></button><button disabled={!chat.online} onClick={()=>action('Voice note')}><Mic size={18}/></button></div><button className="sendbtn" disabled={!chat.online} onClick={send} aria-label="Send message"><Send size={17} fill="currentColor"/></button></footer>
-     </>:<div className="welcome"><div className="welcome-art"><MessageCircle size={60}/><Sparkles className="spark"/></div><h2>Your conversations, connected.</h2><p>Pick a chat from your network, or start a new one.</p><span>When LAN discovery is available, discovered people will appear here.</span></div>}</section>
-     {details&&chat&&<aside className="detailpane"><header><h2>Chat details</h2><button className="iconbtn close-details" onClick={()=>setDetails(false)}><X size={17}/></button></header><div className="profile-summary"><Avatar peer={chat} size="lg"/><h3>{chat.name}</h3><span><i className={chat.online?'status-dot':''}/>{chat.status}</span><div className="quick-actions"><button disabled={!chat.online} onClick={()=>action('Message')}><MessageCircle size={17}/></button><button disabled={!chat.online} onClick={()=>action('Voice call')}><Phone size={17}/></button><button disabled={!chat.online} onClick={()=>action('Video call')}><Video size={17}/></button><button onClick={()=>action('More options')}><MoreHorizontal size={17}/></button></div></div><div className="detail-stats"><div><Image size={17}/><span>Media</span><b>0</b></div><div><FileText size={17}/><span>Files</span><b>0</b></div><div><Pin size={17}/><span>Pinned messages</span><b>0</b></div></div><div className="empty-list"><MessageCircle size={20}/><strong>No shared content</strong><span>Shared media, files, and pinned messages will appear here.</span></div></aside>}
-    </>
-   ):(
-    <div className="page-container">
-     {tab==='Onboarding'?<OnboardingScreen onFinish={()=>setTab('Chats')} onSaveProfile={(name,color)=>setProfile({name,color})}/>:tab==='Profile'?<ProfileScreen onAction={action} onSaveProfile={(name,color)=>setProfile({name,color})}/>:tab==='Settings'?<SettingsScreen onAction={action} onCheckUpdates={checkUpdates} onProfileNameChange={name=>setProfile(current=>({...current,name}))} dark={dark} onTheme={changeTheme}/>:tab==='People'?<PeopleScreen peers={peers} onSelect={id=>{setActive(id);setTab('Chats')}}/>:tab==='Calls'?<CallsScreen/>:tab==='Groups'?<GroupsScreen/>:null}
-    </div>
-   )}
-  </div>
-  {notice&&<div className="toast"><CheckCheck size={17}/>{notice}<button onClick={()=>setNotice('')}><X size={14}/></button></div>}
- </main>
+const NAV: ReadonlyArray<{ view: View; icon: IconName; label: string }> = [
+  { view: 'chats', icon: 'messageCircle', label: text('navChats', 'Chats') },
+  { view: 'groups', icon: 'usersRound', label: text('navGroups', 'Groups') },
+  { view: 'people', icon: 'contactRound', label: text('navPeople', 'People') },
+  { view: 'calls', icon: 'phone', label: text('navCalls', 'Calls') },
+  { view: 'settings', icon: 'settings', label: text('navSettings', 'Settings') },
+];
+
+const isTauri = (): boolean => typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+
+function prefersDark(): boolean {
+  return globalThis.window?.matchMedia('(prefers-color-scheme: dark)').matches ?? false;
 }
 
-function ScreenHeader({eyebrow,title,description}:{eyebrow:string,title:string,description:string}){return <div className="screen-header"><span>{eyebrow}</span><h2>{title}</h2><p>{description}</p></div>}
-function PeopleScreen({peers,onSelect}:{peers:Peer[],onSelect:(id:string)=>void}){return <div className="aux-screen"><div className="aux-container"><ScreenHeader eyebrow="YOUR LOCAL NETWORK" title="People" description="Signed peers on your local network. Direct messages use an authenticated encrypted session."/><div className="network-banner"><Wifi/><div><b>{peers.length?peers.length+' signed peer'+(peers.length===1?'':'s')+' discovered':'Searching for peers'}</b><span>{peers.filter(peer=>peer.online).length} peers available for messaging</span></div><button className="iconbtn" disabled title="Discovery refresh runs automatically">↻</button></div>{peers.length===0?<div className="empty-page-state"><ContactRound size={32}/><strong>No peers discovered</strong><span>Keep AlverChat open on another device on this local network.</span></div>:<div className="aux-grid">{peers.filter(peer=>!peer.group).map(peer=><article className="person-card" key={peer.id}><Avatar peer={peer} size="lg"/><h3>{peer.name}</h3><span><i className={peer.online?'status-dot':''}/>{peer.online?'Online':peer.status}</span><div><button className="primary" onClick={()=>onSelect(peer.id)}><MessageCircle size={15}/> Open chat</button><button className="soft-button" disabled={!peer.online} title="Calls are unavailable until call transport is implemented"><Phone size={15}/></button></div></article>)}</div>}</div></div>}
-function GroupsScreen(){return <div className="aux-screen"><div className="aux-container"><div className="groups-title"><ScreenHeader eyebrow="TEAM CONVERSATIONS" title="Groups unavailable" description="Group membership and message transport have not been implemented yet."/><button className="primary" disabled title="Group storage and membership are not available yet"><Plus size={15}/> New group · unavailable</button></div><div className="empty-page-state"><UsersRound size={32}/><strong>No groups</strong><span>Groups will appear here after group membership is implemented.</span></div></div></div>}
-function CallsScreen(){return <div className="aux-screen"><div className="aux-container"><ScreenHeader eyebrow="CALLS" title="Calls unavailable" description="LAN call signaling and media are not connected in this build."/><div className="empty-page-state"><Phone size={32}/><strong>No call history</strong><span>Calls will appear here when calling is implemented.</span></div></div></div>}
-function SettingsScreen({onAction,onCheckUpdates,onProfileNameChange,dark,onTheme}:{onAction:(s:string)=>void,onCheckUpdates:()=>void,onProfileNameChange:(name:string)=>void,dark:boolean,onTheme:(dark:boolean)=>void}){const [section,setSection]=useState('General');const sections=['General','Floating Icon & Bubbles','Notifications','Messages','Calls','Privacy & Network','About'];return <div className="settings-screen"><div className="settings-sidebar"><div className="settings-brand"><span><MessageCircle size={18}/></span><b>{APP_NAME}</b><i/>Settings</div>{sections.map((s,i)=><button key={s} className={section===s?'chosen':''} onClick={()=>setSection(s)}>{[Settings,MessageCircle,Bell,MessageCircle,Phone,ShieldCheck,Sparkles].map((Icon,n)=>i===n?<Icon key={n} size={17}/>:null)}{s}</button>)}<div className="settings-version">{APP_NAME} v0.1.0<br/><span>● LAN discovery starts with the app</span></div></div><div className="settings-content"><div className="settings-container"><ScreenHeader eyebrow="PREFERENCES" title={section} description="App behavior, appearance and basic preferences."/><div className="settings-card" style={{display:section==='General'?'block':'none'}}><label className="settings-row"><span><b>Display Name</b><small>Saved on this device. Network identity setup is still in progress.</small></span><input defaultValue={localStorage.getItem('alverchat.profile.name')??''} placeholder="Enter a display name" onChange={event=>{localStorage.setItem('alverchat.profile.name',event.target.value);onProfileNameChange(event.target.value)}}/></label><SettingToggle title="Launch at login" hint="Start AlverChat when I log in to my computer." disabled/><div className="settings-row"><span><b>Theme</b><small>Choose how AlverChat looks.</small></span><div className="segmented"><button className={!dark?'on':''} onClick={()=>onTheme(false)}><Sun size={14}/> Light</button><button className={dark?'on':''} onClick={()=>onTheme(true)}><Moon size={14}/> Dark</button><button onClick={()=>onTheme(window.matchMedia('(prefers-color-scheme: dark)').matches)}>System</button></div></div><div className="settings-row"><span><b>LAN encryption</b><small>Direct messages are always end-to-end encrypted.</small></span><input type="password" disabled aria-label="LAN encryption unavailable"/></div><SettingToggle title="Visible on network" hint="Allow others to find and chat with me." disabled/><div className="settings-row"><span><b>Connection diagnostics</b><small>LAN discovery status is shown in the app footer.</small></span><button className="primary" disabled>Run test</button></div></div><SettingsExtra section={section} onAction={onAction} onCheckUpdates={onCheckUpdates}/><div className="settings-foot">Backup & Export <button className="soft-button" disabled title="Backup and restore are not available yet">Create backup · unavailable</button></div></div></div></div>}
-function SettingsExtra({section,onAction,onCheckUpdates}:{section:string,onAction:(s:string)=>void,onCheckUpdates:()=>void}){
- const [overlay,setOverlay]=useState({snapToEdge:true,bubblesEnabled:true,bubbleAutoHideSeconds:8});
- useEffect(()=>{if(section==='Floating Icon & Bubbles')void bridgeForRuntime().then(b=>b.overlaySnapshot()).then(s=>setOverlay({snapToEdge:s.snapToEdge,bubblesEnabled:s.bubblesEnabled,bubbleAutoHideSeconds:s.bubbleAutoHideSeconds}))},[section]);
- const control=(title:string,hint:string,widget:ReactNode)=><div className="settings-row" key={title}><span><b>{title}</b><small>{hint}</small></span>{widget}</div>;
- const saveBubbles=(enabled:boolean,delay:number)=>{setOverlay(v=>({...v,bubblesEnabled:enabled,bubbleAutoHideSeconds:delay}));void bridgeForRuntime().then(b=>b.setBubbleSettings(enabled,delay))};
- if(section==='General')return null;
- if(section==='Floating Icon & Bubbles')return <div className="settings-card"><SettingToggle title="Enable message bubbles" hint="Show incoming messages beside the floating icon." initial={overlay.bubblesEnabled} onChange={enabled=>saveBubbles(enabled,overlay.bubbleAutoHideSeconds)}/><SettingSelect title="Idle icon" options={['AlverChat Logo','My Profile Photo']} disabled/><div className="settings-row"><span><b>Icon morph delay</b><small>Return to the AlverChat icon after a new message.</small></span><SettingRange title="Icon morph delay" value="5 s" disabled/></div><div className="settings-row"><span><b>Bubble auto-hide delay</b><small>Keep bubbles visible while you are reading.</small></span><SettingRange title="Bubble auto-hide delay" value={`${overlay.bubbleAutoHideSeconds} s`} onChange={delay=>saveBubbles(overlay.bubblesEnabled,delay)}/></div><SettingSelect title="Screen corner / side" options={['Right · Center','Right · Bottom','Left · Center']} disabled/><SettingToggle title="Snap to edge" hint="Dock the icon to the nearest screen edge." initial={overlay.snapToEdge} onChange={enabled=>{setOverlay(v=>({...v,snapToEdge:enabled}));void bridgeForRuntime().then(b=>b.setSnapToEdge(enabled))}}/><button className="soft-button" onClick={()=>void bridgeForRuntime().then(b=>b.resetOverlayPosition())}>Reset position</button><div className="settings-row"><span><b>Opacity</b><small>Display opacity is not configurable yet.</small></span><SettingRange title="Opacity" value="90%" disabled/></div></div>;
- if(section==='Notifications')return <div className="settings-card"><SettingSelect title="Notification sound" options={['Message (Default)','Soft Pop','None']} disabled/><SettingToggle title="Do Not Disturb" hint="Silence notifications during scheduled hours." disabled/><div className="days-row">{['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].map(day=><button className={day!=='Sat'&&day!=='Sun'?'day-on':''} key={day} disabled>{day}</button>)}</div><SettingSelect title="From" options={['10:00 PM','11:00 PM','12:00 AM']} disabled/><SettingSelect title="To" options={['07:00 AM','08:00 AM','09:00 AM']} disabled/>{control('Muted chats','Manage conversations muted on this device.',<button className="soft-button" disabled title="Muted chat management is unavailable">Manage</button>)}<SettingToggle title="Show message preview" hint="Include sender and message in notifications." disabled/></div>;
- if(section==='Messages')return <div className="settings-card"><SettingSelect title="Edit time limit" options={['15 minutes','1 hour','Never']} disabled/><SettingSelect title="Auto-download size limit" options={['10 MB','50 MB','100 MB']} disabled/>{control('Save downloads to','Choose a folder for received files.',<button className="soft-button" disabled title="Downloads are unavailable until file transfer is implemented">Browse…</button>)}{control('Clear chat history','Remove local messages and media from this device.',<button className="danger-action" disabled title="There is no message deletion flow yet">Clear history</button>)}</div>;
- if(section==='Calls')return <div className="settings-card"><SettingSelect title="Microphone" options={['Default microphone','Built-in microphone','USB audio device']} disabled/><SettingSelect title="Speaker" options={['Default speakers','Built-in output','USB audio device']} disabled/><SettingSelect title="Camera" options={['Default camera','FaceTime HD Camera','USB camera']} disabled/><SettingToggle title="Noise suppression" hint="Reduce background noise during calls." disabled/><SettingToggle title="Echo cancellation" hint="Prevent echo and audio feedback." disabled/><SettingSelect title="Ringtone" options={['AlverChat Call','Soft chime','None']} disabled/><button className="primary settings-test" disabled>Test your setup</button></div>;
- if(section==='Privacy & Network')return <div className="settings-card"><SettingToggle title="LAN encryption" hint="Encrypted peer sessions are enabled." disabled/><label className="settings-row"><span><b>LAN passphrase</b><small>Passphrase protection is not available yet.</small></span><input type="password" disabled aria-label="Passphrase unavailable"/></label><SettingSelect title="Who can see my status" options={['Everyone on network','My contacts','Nobody']} disabled/><SettingToggle title="Visible on network" hint="Network visibility is required for peer discovery." disabled/><SettingSelect title="Network adapter" options={['Automatic','Wi-Fi','Ethernet']} disabled/>{control('Connection diagnostics','Signed peer discovery and encrypted sessions are available.',<button className="primary" disabled title="Connection diagnostics are not available yet">Run test</button>)}{control('Firewall help','Allow AlverChat to communicate on your private network.',<button className="soft-button" disabled title="Firewall guide is not available yet">Open guide</button>)}</div>;
- return <div className="settings-card about-settings"><span className="about-logo"><MessageCircle size={28}/></span><b>AlverChat v0.1.0</b><span className="uptodate">Update status is checked when requested</span>{['Check for updates','Create Backup','Export Data','Restore from Backup'].map(label=><button className="soft-button" key={label} disabled={label!=='Check for updates'} onClick={()=>label==='Check for updates'?onCheckUpdates():onAction(label+' is unavailable in this build')}>{label}{label!=='Check for updates'?' · unavailable':''}</button>)}</div>
+export default function App() {
+  const { bridge, settings, setSettings, identity, ready } = useAppBridge();
+  const [peers, setPeers] = useState<Peer[]>([]);
+  const [view, setView] = useState<View>('chats');
+  const [activeChat, setActiveChat] = useState<string | null>(null);
+  const [detailsOpen, setDetailsOpen] = useState(true);
+  const [mobileChat, setMobileChat] = useState(false);
+  const [revision, setRevision] = useState(0);
+  const [toasts, setToasts] = useState<readonly ToastView[]>([]);
+  const [avatar, setAvatar] = useState<string | null>(null);
+  const [systemDark, setSystemDark] = useState(prefersDark);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const activeRef = useRef<string | null>(null);
+  activeRef.current = activeChat;
+
+  const toast = useCallback((message: string, tone: ToastTone = 'neutral') => {
+    setToasts(current => [...current.slice(-2), { id: `${Date.now()}-${Math.random()}`, message, tone }]);
+  }, []);
+
+  const go = useCallback((next: View, chatId?: string) => {
+    setView(next);
+    if (chatId) {
+      setActiveChat(chatId);
+      setMobileChat(true);
+    }
+  }, []);
+
+  const patchSettings = useCallback(
+    (patch: Partial<AppSettings>) => {
+      setSettings(current => ({ ...current, ...patch }));
+      void bridge
+        .updateSettings(patch)
+        .then(setSettings)
+        .catch(error => toast(String(error), 'danger'));
+    },
+    [bridge, setSettings, toast],
+  );
+
+  useEffect(() => {
+    void bridge.listPeers().then(setPeers).catch(() => setPeers([]));
+    void bridge.getAvatar().then(setAvatar).catch(() => setAvatar(null));
+  }, [bridge]);
+
+  // Evaluated once, after settings load: clearing the display name in Settings
+  // must not trap the user back in setup.
+  const gated = useRef(false);
+  useEffect(() => {
+    if (!ready || gated.current) return;
+    gated.current = true;
+    if (needsOnboarding(settings)) setView('onboarding');
+  }, [ready, settings]);
+
+  useEffect(() => {
+    if (!activeChat && peers.length > 0) setActiveChat(peers[0].id);
+  }, [activeChat, peers]);
+
+  /* Desktop events: discovery, tray navigation, new traffic, hotkey failures, settings writes. */
+  useEffect(() => {
+    if (!isTauri()) return;
+    let alive = true;
+    const stops: Array<() => void> = [];
+    const on = <T,>(name: string, handler: (payload: T) => void) => {
+      void listen<T>(name, event => {
+        if (alive) handler(event.payload);
+      }).then(stop => {
+        if (alive) stops.push(stop);
+        else stop();
+      });
+    };
+    on<{ peers: Peer[] }>('overlay-state', state => setPeers(state.peers));
+    on<string | null>('navigate-chat', chatId => {
+      if (chatId) {
+        setActiveChat(chatId);
+        setMobileChat(true);
+      }
+      setView('chats');
+    });
+    on<string>('messages-changed', chatId => {
+      if (chatId === activeRef.current) void bridge.markAsRead(chatId).catch(() => undefined);
+      setRevision(current => current + 1);
+    });
+    on<string>('hotkey-error', combo =>
+      toast(text('hotkeyFailed', 'The global shortcut {{combo}} could not be registered.', { combo }), 'danger'),
+    );
+    on<unknown>('settings-changed', () => {
+      void bridge.getSettings().then(setSettings).catch(() => undefined);
+    });
+    return () => {
+      alive = false;
+      for (const stop of stops) stop();
+    };
+  }, [bridge, setSettings, toast]);
+
+  useEffect(() => {
+    const query = globalThis.window?.matchMedia('(prefers-color-scheme: dark)');
+    if (!query) return;
+    const onChange = (event: MediaQueryListEvent) => setSystemDark(event.matches);
+    query.addEventListener('change', onChange);
+    return () => query.removeEventListener('change', onChange);
+  }, []);
+
+  const dark = settings.theme === 'dark' || (settings.theme === 'system' && systemDark);
+
+  /* ⌘K focuses the list search, ⌘W closes details, and the dev keys are dead in release builds. */
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const mod = event.metaKey || event.ctrlKey;
+      if (mod && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        setView('chats');
+        searchRef.current?.focus();
+        return;
+      }
+      if (mod && event.key.toLowerCase() === 'w') {
+        event.preventDefault();
+        setDetailsOpen(false);
+        return;
+      }
+      if (!import.meta.env.PROD) return;
+      const blocked =
+        event.key === 'F5' ||
+        event.key === 'F12' ||
+        (mod && event.key.toLowerCase() === 'r') ||
+        (mod && event.shiftKey && event.key.toLowerCase() === 'i');
+      if (blocked) event.preventDefault();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  const chat = useMemo(() => peers.find(peer => peer.id === activeChat) ?? null, [peers, activeChat]);
+  const unreadTotal = peers.reduce((total, peer) => total + (peer.unread ?? 0), 0);
+  const online = peers.filter(peer => peer.online).length;
+
+  const props: ScreenProps = { bridge, view, go, toast, peers, activeChat, settings, patchSettings, identity };
+
+  return (
+    <main className={cx('app', dark && 'dark', mobileChat && 'mobile-chat')} onContextMenu={event => event.preventDefault()}>
+      <aside className="rail">
+        <button aria-label={text('openChats', 'Open chats')} className="brandmark" onClick={() => go('chats')} type="button">
+          <Icon filled name="messageCircle" size={22} />
+          <span className="brand-dot">•••</span>
+        </button>
+        <button aria-label={text('openMyProfile', 'Open my profile')} className="rail-user" onClick={() => go('profile')} type="button">
+          <Avatar
+            initials={initialsFor(settings.displayName)}
+            name={settings.displayName || APP_NAME}
+            size={40}
+            src={avatar ?? undefined}
+          />
+        </button>
+        <nav className="rail-nav">
+          {NAV.map(item => (
+            <button
+              aria-current={view === item.view ? 'page' : undefined}
+              className={cx(view === item.view && 'selected')}
+              key={item.view}
+              onClick={() => go(item.view)}
+              title={item.label}
+              type="button"
+            >
+              <Icon name={item.icon} size={19} />
+              <span>{item.label}</span>
+              {item.view === 'chats' && unreadTotal > 0 ? <b className="rail-count">{unreadTotal}</b> : null}
+            </button>
+          ))}
+        </nav>
+        <div className="rail-bottom">
+          <button
+            aria-label={text('toggleTheme', 'Toggle theme')}
+            onClick={() => patchSettings({ theme: dark ? 'light' : 'dark' })}
+            title={dark ? text('themeDark', 'Dark') : text('themeLight', 'Light')}
+            type="button"
+          >
+            <Icon name={dark ? 'sun' : 'moon'} size={19} />
+          </button>
+          <span
+            className={cx('rail-status-dot', online === 0 && 'rail-status-dot--off')}
+            title={online ? text('lanReady', 'LAN discovery is connected') : text('lanSearching', 'LAN discovery is not connected')}
+          />
+        </div>
+      </aside>
+
+      <div className="main-area">
+        {view === 'chats' ? (
+          <>
+            <ChatList
+              active={activeChat}
+              bridge={bridge}
+              onNewChat={() => go('people')}
+              onNewGroup={() => go('groups')}
+              onOpenNetwork={() => go('settings')}
+              onPatchSettings={patchSettings}
+              onSelect={id => {
+                setActiveChat(id);
+                setMobileChat(true);
+              }}
+              peers={peers}
+              searchRef={searchRef}
+              settings={settings}
+              toast={toast}
+            />
+            {chat ? (
+              <Conversation
+                bridge={bridge}
+                chatId={chat.id}
+                detailsOpen={detailsOpen}
+                key={chat.id}
+                myId={identity?.peerId ?? 'me'}
+                onBack={() => setMobileChat(false)}
+                onCall={() => toast(text('callUnavailable', 'Calls are unavailable until LAN call signaling is connected.'))}
+                onToggleDetails={setDetailsOpen}
+                peers={peers}
+                peer={chat}
+                revision={revision}
+                settings={settings}
+                toast={toast}
+              />
+            ) : (
+              <div className="ac-page__empty">
+                <EmptyState
+                  icon="messageCircle"
+                  message={text('noChatBody', 'Pick someone from the list, or open People to find a peer on this network.')}
+                  title={text('noChatTitle', 'No chat selected')}
+                />
+              </div>
+            )}
+            {detailsOpen && chat ? (
+              <ChatDetails
+                bridge={bridge}
+                chatId={chat.id}
+                identity={identity}
+                key={`details-${chat.id}`}
+                onClose={() => setDetailsOpen(false)}
+                onOpenChat={id => {
+                  setActiveChat(id);
+                  setMobileChat(true);
+                }}
+                onPatchSettings={patchSettings}
+                peers={peers}
+                peer={chat}
+                settings={settings}
+                toast={toast}
+              />
+            ) : null}
+          </>
+        ) : (
+          <div className="ac-page">
+            {view === 'onboarding' ? (
+              <OnboardingScreen {...props} />
+            ) : view === 'groups' ? (
+              <GroupsScreen {...props} />
+            ) : view === 'people' ? (
+              <PeopleScreen {...props} />
+            ) : view === 'calls' ? (
+              <CallsScreen {...props} />
+            ) : view === 'profile' ? (
+              <ProfileScreen {...props} />
+            ) : view === 'settings' ? (
+              <SettingsScreen {...props} />
+            ) : null}
+          </div>
+        )}
+      </div>
+
+      <ToastViewport onDismiss={id => setToasts(current => current.filter(entry => entry.id !== id))} toasts={toasts} />
+    </main>
+  );
 }
-function preferenceKey(title:string){return `alverchat.preference.${title.toLowerCase().replace(/[^a-z0-9]+/g,'-')}`}
-function SettingRange({title='Delay',value,disabled=false,onChange}:{title?:string,value:string,disabled?:boolean,onChange?:(next:number)=>void}){const initial=Number.parseInt(value,10)||5;const [current,setCurrent]=useState(initial);useEffect(()=>setCurrent(initial),[initial]);return <label className="range-setting"><input aria-label={title} disabled={disabled} type="range" min="1" max="60" value={current} onChange={event=>{const next=Number(event.target.value);setCurrent(next);onChange?.(next)}}/><span>{current}{value.includes('s')?' s':'%'}</span></label>}
-function SettingToggle({title,hint,onChange,initial=true,disabled=false}:{title:string,hint:string,onChange?:(enabled:boolean)=>void,initial?:boolean,disabled?:boolean}){const [on,setOn]=useState(initial);useEffect(()=>setOn(initial),[initial]);return <div className="settings-row"><span><b>{title}</b><small>{disabled?'Unavailable in this build':hint}</small></span><button disabled={disabled} role="switch" aria-checked={on} className={`switch ${on?'enabled':''}`} onClick={()=>{const enabled=!on;setOn(enabled);onChange?.(enabled)}}><i/></button></div>}
-function SettingSelect({title,options,disabled=false}:{title:string,options:string[],disabled?:boolean}){const key=preferenceKey(title);const [value,setValue]=useState(()=>{try{return localStorage.getItem(key)??options[0]}catch{return options[0]}});return <label className="settings-row"><span><b>{title}</b>{disabled&&<small>Unavailable in this build</small>}</span><select disabled={disabled} value={value} onChange={event=>{setValue(event.target.value);try{localStorage.setItem(key,event.target.value)}catch{}}}>{options.map(option=><option key={option}>{option}</option>)}</select></label>}
-function ProfileScreen({onAction,onSaveProfile}:{onAction:(s:string)=>void,onSaveProfile:(name:string,color:string)=>void}){const [name,setName]=useState(()=>localStorage.getItem('alverchat.profile.name')??'');const [status,setStatus]=useState(()=>localStorage.getItem('alverchat.profile.status')??'Available');const [custom,setCustom]=useState(()=>localStorage.getItem('alverchat.profile.custom')??'');const [color,setColor]=useState(()=>localStorage.getItem('alverchat.profile.color')??'violet');function save(){localStorage.setItem('alverchat.profile.name',name.trim());localStorage.setItem('alverchat.profile.status',status);localStorage.setItem('alverchat.profile.custom',custom);localStorage.setItem('alverchat.profile.color',color);onSaveProfile(name.trim(),color);onAction('Profile saved on this device')}return <div className="aux-screen profile-screen"><div className="aux-container"><ScreenHeader eyebrow="YOUR ACCOUNT" title="My profile" description="Choose how people see you on your local network."/><div className="profile-layout"><section className="my-profile-card"><div className="my-avatar"><span className={`avatar lg ${color}`}>{name.trim()?name.trim().split(/\s+/).map(part=>part[0]).join('').slice(0,2).toUpperCase():'?'}</span><button disabled title="Profile photo upload is not available yet"><Camera size={15}/></button></div><label>Display name<input value={name} maxLength={40} placeholder="Enter a display name" onChange={event=>setName(event.target.value)}/></label><label>Status<select value={status} onChange={event=>setStatus(event.target.value)}>{['Available','Busy','In a meeting','Away'].map(item=><option key={item}>{item}</option>)}</select></label><label>Custom status<input value={custom} maxLength={100} placeholder="Optional" onChange={event=>setCustom(event.target.value)}/></label><small className="char-count">{custom.length}/100</small><button className="primary save-profile" onClick={save}>Save changes</button></section><section className="contact-preview-card"><div className="preview-label">PROFILE PREVIEW</div><span className={`avatar lg ${color}`}>{name.trim()?name.trim().split(/\s+/).map(part=>part[0]).join('').slice(0,2).toUpperCase():'?'}</span><h3>{name.trim()||'Your name'}</h3><span className="profile-status">{status}</span><p>{custom}</p><div className="palette-title">Avatar fallback color</div><div className="palette">{['violet','blue','green','peach','rose','slate'].map(c=><button aria-label={`${c} avatar color`} className={`${c} ${color===c?'chosen':''}`} onClick={()=>setColor(c)} key={c}/>)}</div></section></div></div></div>}
-function OnboardingScreen({onFinish,onSaveProfile}:{onFinish:()=>void,onSaveProfile:(name:string,color:string)=>void}){const [step,setStep]=useState(0);const [name,setName]=useState(()=>localStorage.getItem('alverchat.profile.name')??'');const [color,setColor]=useState(()=>localStorage.getItem('alverchat.profile.color')??'violet');return <div className="onboarding-screen"><div className="onboarding-window"><div className="onboarding-brand"><span><MessageCircle size={17}/></span><b>AlverChat</b></div><div className="steps">{['Welcome','Profile','Permissions'].map((label,index)=><div key={label} className={index===step?'current':index<step?'complete':''}><i>{index<step?<Check size={13}/>:index+1}</i>{label}</div>)}</div>{step===0?<div className="welcome-step"><div className="welcome-art"><MessageCircle size={56}/><Sparkles className="spark"/></div><h2>Chat on your network.</h2><p>Discover peers and exchange end-to-end encrypted messages on your local network.</p><div className="benefits"><span>LAN discovery</span><span>Local data storage</span><span>Private identity</span></div></div>:step===1?<div className="profile-step"><h2>Set up your profile</h2><p>Let others recognize you on the network.</p><div className="profile-preview"><span className={`avatar lg ${color}`}>{name.trim()?name.trim().split(/\s+/).map(part=>part[0]).join('').slice(0,2).toUpperCase():'?'}</span><button disabled aria-label="Profile photo upload unavailable"><Camera size={15}/></button></div><label>Display name<input value={name} maxLength={40} placeholder="Enter a display name" onChange={event=>setName(event.target.value)}/></label><div className="palette-title">Avatar color</div><div className="palette">{['violet','blue','green','peach','rose','slate'].map(c=><button aria-label={`${c} avatar color`} className={`${c} ${color===c?'chosen':''}`} onClick={()=>setColor(c)} key={c}/>)}</div></div>:<div className="permissions-step"><h2>Network discovery</h2><p>AlverChat checks for signed peers on your local network.</p><div className="permission-card"><Globe/><span><b>Local network discovery</b><small>Peer discovery starts with the app.</small></span><em>Enabled</em></div><div className="permission-card"><ShieldCheck/><span><b>Secure messaging</b><small>End-to-end encrypted messages are available with connected peers.</small></span><em>Available</em></div><div className="permission-note"><ShieldCheck size={16}/>Messages are stored securely and sent over an authenticated encrypted connection.</div></div>}<footer><button className="soft-button" disabled={step===0} onClick={()=>setStep(Math.max(0,step-1))}>Back</button>{step<2?<button className="primary" onClick={()=>setStep(step+1)}>{step===0?'Get started':'Continue'} <ChevronRight size={15}/></button>:<button className="primary" onClick={()=>{localStorage.setItem('alverchat.profile.name',name.trim());localStorage.setItem('alverchat.profile.color',color);onSaveProfile(name.trim(),color);onFinish()}}>Finish setup <Check size={15}/></button>}</footer></div></div>}

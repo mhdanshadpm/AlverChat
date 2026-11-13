@@ -2,7 +2,183 @@ use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
 use crate::groups::GroupState;
+use crate::rules;
 use crate::{Envelope, Hlc, Message};
+
+/// Ordered, additive schema history.
+///
+/// Each entry is `(version, DDL)` and runs exactly once, inside its own transaction,
+/// guarded by `PRAGMA user_version`. Deviation from the spec: `refinery` is not used,
+/// because it would add a new build dependency to a crate that currently vendors
+/// OpenSSL for SQLCipher; this hand-rolled runner keeps refinery's guarantees (ordered
+/// versions, one transaction per migration, never re-running or dropping anything).
+pub const MIGRATIONS: &[MIGRATION] = &[
+    MIGRATION {
+        version: 1,
+        // v1 is frozen: an existing database must open with these tables untouched.
+        sql: "
+                 CREATE TABLE IF NOT EXISTS peers (id TEXT PRIMARY KEY, public_key BLOB NOT NULL, trusted INTEGER NOT NULL DEFAULT 0);
+                 CREATE TABLE IF NOT EXISTS peer_directory (id TEXT PRIMARY KEY REFERENCES peers(id) ON DELETE CASCADE, display_name TEXT NOT NULL, last_seen_ms INTEGER NOT NULL DEFAULT 0);
+                 CREATE TABLE IF NOT EXISTS chats (id TEXT PRIMARY KEY, name TEXT NOT NULL, is_group INTEGER NOT NULL DEFAULT 0);
+                 CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, sender TEXT NOT NULL, body TEXT NOT NULL, physical_ms INTEGER NOT NULL, logical INTEGER NOT NULL, tombstone INTEGER NOT NULL DEFAULT 0, FOREIGN KEY(chat_id) REFERENCES chats(id));
+                 CREATE INDEX IF NOT EXISTS messages_by_chat_clock ON messages(chat_id, physical_ms, logical);
+                 CREATE TABLE IF NOT EXISTS message_revisions (message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE, revision INTEGER NOT NULL, body TEXT NOT NULL, physical_ms INTEGER NOT NULL, logical INTEGER NOT NULL, PRIMARY KEY(message_id, revision));
+                 CREATE TABLE IF NOT EXISTS outbox (id TEXT PRIMARY KEY, peer_id TEXT NOT NULL, envelope BLOB NOT NULL, attempt INTEGER NOT NULL DEFAULT 0);
+                 CREATE TABLE IF NOT EXISTS groups (id TEXT PRIMARY KEY, name TEXT NOT NULL, epoch INTEGER NOT NULL, state BLOB NOT NULL);
+                 CREATE TABLE IF NOT EXISTS group_members (group_id TEXT NOT NULL REFERENCES groups(id) ON DELETE CASCADE, peer_id TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('admin','member')), PRIMARY KEY(group_id, peer_id));
+                 CREATE VIRTUAL TABLE IF NOT EXISTS message_search USING fts5(message_id UNINDEXED, body);
+             ",
+    },
+    MIGRATION {
+        version: 2,
+        sql: "
+                 CREATE TABLE IF NOT EXISTS reactions (message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE, peer_id TEXT NOT NULL, emoji TEXT NOT NULL, created_ms INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(message_id, peer_id, emoji));
+                 CREATE INDEX IF NOT EXISTS reactions_by_message ON reactions(message_id);
+                 CREATE TABLE IF NOT EXISTS receipts (message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE, peer_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('delivered','read')), occurred_ms INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(message_id, peer_id));
+                 CREATE INDEX IF NOT EXISTS receipts_by_message ON receipts(message_id);
+                 CREATE TABLE IF NOT EXISTS pins (message_id TEXT NOT NULL PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE, chat_id TEXT NOT NULL, position INTEGER NOT NULL DEFAULT 0, pinned_ms INTEGER NOT NULL DEFAULT 0);
+                 CREATE INDEX IF NOT EXISTS pins_by_chat ON pins(chat_id, position, pinned_ms);
+                 CREATE TABLE IF NOT EXISTS stars (message_id TEXT NOT NULL PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE, chat_id TEXT NOT NULL, starred_ms INTEGER NOT NULL DEFAULT 0);
+                 CREATE INDEX IF NOT EXISTS stars_by_chat ON stars(chat_id, starred_ms);
+                 CREATE TABLE IF NOT EXISTS attachments (id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, message_id TEXT, file_name TEXT NOT NULL, size_bytes INTEGER NOT NULL DEFAULT 0, blake3_hash BLOB, status TEXT NOT NULL CHECK(status IN ('idle','offered','accepted','transferring','paused','completed','failed','cancelled')), updated_ms INTEGER NOT NULL DEFAULT 0);
+                 CREATE INDEX IF NOT EXISTS attachments_by_chat ON attachments(chat_id, updated_ms);
+                 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_ms INTEGER NOT NULL DEFAULT 0);
+                 CREATE TABLE IF NOT EXISTS avatar_cache (peer_id TEXT PRIMARY KEY, media_type TEXT NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL, hash TEXT NOT NULL, bytes BLOB NOT NULL, updated_ms INTEGER NOT NULL DEFAULT 0);
+             ",
+    },
+    MIGRATION {
+        version: 3,
+        sql: "
+                 CREATE TABLE IF NOT EXISTS announcements (id TEXT PRIMARY KEY, group_id TEXT NOT NULL, sender TEXT NOT NULL, body TEXT NOT NULL, physical_ms INTEGER NOT NULL DEFAULT 0, logical INTEGER NOT NULL DEFAULT 0, admins_only INTEGER NOT NULL DEFAULT 0, created_ms INTEGER NOT NULL DEFAULT 0);
+                 CREATE INDEX IF NOT EXISTS announcements_by_group ON announcements(group_id, physical_ms, logical);
+                 CREATE TABLE IF NOT EXISTS announcement_acks (announcement_id TEXT NOT NULL REFERENCES announcements(id) ON DELETE CASCADE, peer_id TEXT NOT NULL, acked_ms INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(announcement_id, peer_id));
+             ",
+    },
+    MIGRATION {
+        version: 4,
+        sql: "
+                 CREATE TABLE IF NOT EXISTS call_events (id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, call_id TEXT NOT NULL, peer_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('offer','answer','end','reject','busy')), accepted INTEGER, started_ms INTEGER NOT NULL DEFAULT 0, ended_ms INTEGER, note TEXT NOT NULL DEFAULT '');
+                 CREATE INDEX IF NOT EXISTS call_events_by_chat ON call_events(chat_id, started_ms, id);
+             ",
+    },
+];
+
+/// One entry of [`MIGRATIONS`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MIGRATION {
+    pub version: u32,
+    pub sql: &'static str,
+}
+
+/// The highest schema version this build knows how to reach.
+pub const LATEST_SCHEMA_VERSION: u32 = MIGRATIONS[MIGRATIONS.len() - 1].version;
+
+/// Connection-level pragmas that must run outside a migration transaction.
+const BOOTSTRAP_PRAGMAS: &str = "PRAGMA foreign_keys = ON;";
+
+/// Encrypted local store. The key must come from the platform keychain.
+pub struct Store {
+    pub(crate) connection: Connection,
+}
+
+impl Store {
+    pub fn open(path: &str, key: &[u8; 32]) -> Result<Self, String> {
+        Self::open_to_version(path, key, LATEST_SCHEMA_VERSION)
+    }
+
+    /// Opens a database and migrates it only as far as `target_version`.
+    ///
+    /// Used by the upgrade tests to build a v1 database and then raise it.
+    pub fn open_to_version(
+        path: &str,
+        key: &[u8; 32],
+        target_version: u32,
+    ) -> Result<Self, String> {
+        if target_version > LATEST_SCHEMA_VERSION {
+            return Err(format!(
+                "schema version {target_version} is newer than this build supports"
+            ));
+        }
+        let mut connection = Connection::open(path).map_err(|e| e.to_string())?;
+        let key_hex = key.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        connection
+            .execute_batch(&format!("PRAGMA key = \"x'{key_hex}'\";"))
+            .map_err(|e| e.to_string())?;
+        connection
+            .execute_batch(BOOTSTRAP_PRAGMAS)
+            .map_err(|e| e.to_string())?;
+        migrate(&mut connection, target_version)?;
+        Ok(Self { connection })
+    }
+
+    /// The schema version currently recorded in the database header.
+    pub fn schema_version(&self) -> Result<u32, String> {
+        current_version(&self.connection)
+    }
+
+    /// How many stored revisions a message has, including after a tombstone.
+    pub fn revision_count(&self, message_id: uuid::Uuid) -> Result<i64, String> {
+        self.connection
+            .query_row(
+                "SELECT COUNT(*) FROM message_revisions WHERE message_id = ?1",
+                rusqlite::params![message_id.to_string()],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// Reads `PRAGMA user_version`.
+pub(crate) fn current_version(connection: &Connection) -> Result<u32, String> {
+    connection
+        .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+        .map(|value| value.max(0) as u32)
+        .map_err(|error| error.to_string())
+}
+
+/// Applies every unapplied migration up to `target_version`, one transaction each.
+///
+/// Nothing here drops a table or rewrites an applied migration: already-recorded
+/// versions are skipped, and the version is bumped inside the same transaction as the
+/// DDL so a half-applied migration can never be recorded.
+pub(crate) fn migrate(connection: &mut Connection, target_version: u32) -> Result<(), String> {
+    let mut version = current_version(connection)?;
+    if version > target_version {
+        return Err(format!(
+            "database is at schema version {version}, this run only migrates to {target_version}"
+        ));
+    }
+    for migration in MIGRATIONS {
+        if migration.version <= version {
+            continue;
+        }
+        if migration.version > target_version {
+            break;
+        }
+        if migration.version != version + 1 {
+            return Err(format!(
+                "migration history has a gap: expected version {}, found {}",
+                version + 1,
+                migration.version
+            ));
+        }
+        let transaction = connection.transaction().map_err(|error| error.to_string())?;
+        transaction
+            .execute_batch(migration.sql)
+            .map_err(|error| error.to_string())?;
+        transaction
+            .pragma_update(None, "user_version", migration.version)
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        version = migration.version;
+    }
+    if version != target_version {
+        return Err(format!(
+            "migration history stops at version {version}, cannot reach {target_version}"
+        ));
+    }
+    Ok(())
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoredPeer {
@@ -11,37 +187,7 @@ pub struct StoredPeer {
     pub public_key: [u8; 32],
 }
 
-/// Encrypted local store. The key must come from the platform keychain.
-pub struct Store {
-    connection: Connection,
-}
-
 impl Store {
-    pub fn open(path: &str, key: &[u8; 32]) -> Result<Self, String> {
-        let connection = Connection::open(path).map_err(|e| e.to_string())?;
-        let key_hex = key.iter().map(|b| format!("{b:02x}")).collect::<String>();
-        connection
-            .execute_batch(&format!("PRAGMA key = \"x'{key_hex}'\";"))
-            .map_err(|e| e.to_string())?;
-        connection
-            .execute_batch(
-                "PRAGMA foreign_keys = ON;
-                 CREATE TABLE IF NOT EXISTS peers (id TEXT PRIMARY KEY, public_key BLOB NOT NULL, trusted INTEGER NOT NULL DEFAULT 0);
-                 CREATE TABLE IF NOT EXISTS peer_directory (id TEXT PRIMARY KEY REFERENCES peers(id) ON DELETE CASCADE, display_name TEXT NOT NULL, last_seen_ms INTEGER NOT NULL DEFAULT 0);
-                 CREATE TABLE IF NOT EXISTS chats (id TEXT PRIMARY KEY, name TEXT NOT NULL, is_group INTEGER NOT NULL DEFAULT 0);
-                 CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, sender TEXT NOT NULL, body TEXT NOT NULL, physical_ms INTEGER NOT NULL, logical INTEGER NOT NULL, tombstone INTEGER NOT NULL DEFAULT 0, FOREIGN KEY(chat_id) REFERENCES chats(id));
-                 CREATE INDEX IF NOT EXISTS messages_by_chat_clock ON messages(chat_id, physical_ms, logical); 
-                 CREATE TABLE IF NOT EXISTS message_revisions (message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE, revision INTEGER NOT NULL, body TEXT NOT NULL, physical_ms INTEGER NOT NULL, logical INTEGER NOT NULL, PRIMARY KEY(message_id, revision));
-                 CREATE TABLE IF NOT EXISTS outbox (id TEXT PRIMARY KEY, peer_id TEXT NOT NULL, envelope BLOB NOT NULL, attempt INTEGER NOT NULL DEFAULT 0);
-                 CREATE TABLE IF NOT EXISTS groups (id TEXT PRIMARY KEY, name TEXT NOT NULL, epoch INTEGER NOT NULL, state BLOB NOT NULL);
-                 CREATE TABLE IF NOT EXISTS group_members (group_id TEXT NOT NULL REFERENCES groups(id) ON DELETE CASCADE, peer_id TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('admin','member')), PRIMARY KEY(group_id, peer_id));
-                 CREATE VIRTUAL TABLE IF NOT EXISTS message_search USING fts5(message_id UNINDEXED, body);
-                 PRAGMA user_version = 1;",
-            )
-            .map_err(|e| e.to_string())?;
-        Ok(Self { connection })
-    }
-
     pub fn save_message(&mut self, message: &Message) -> Result<bool, String> {
         let transaction = self.connection.transaction().map_err(|e| e.to_string())?;
         transaction
@@ -381,20 +527,24 @@ impl Store {
         let Some((owner, old_body, tombstone)) = current else {
             return Ok(false);
         };
-        if owner != sender || tombstone {
+        // Authority and permanence come from `rules`, so the identical decisions are
+        // property-testable without a database.
+        if rules::edit_authority(&owner, sender).is_err() || !rules::late_edit_allowed(tombstone) {
             return Ok(false);
         }
-        let revision: i64 = transaction
+        let highest: u64 = transaction
             .query_row(
-                "SELECT COALESCE(MAX(revision), 0) + 1 FROM message_revisions WHERE message_id = ?1",
+                "SELECT COALESCE(MAX(revision), 0) FROM message_revisions WHERE message_id = ?1",
                 params![id.to_string()],
-                |row| row.get(0),
+                |row| row.get::<_, i64>(0),
             )
+            .map(|value| value.max(0) as u64)
             .map_err(|error| error.to_string())?;
+        let revision = rules::next_revision(highest);
         transaction
             .execute(
                 "INSERT INTO message_revisions(message_id, revision, body, physical_ms, logical) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![id.to_string(), revision, old_body, clock.physical_ms, clock.logical],
+                params![id.to_string(), revision as i64, old_body, clock.physical_ms, clock.logical],
             )
             .map_err(|error| error.to_string())?;
         transaction
@@ -420,8 +570,26 @@ impl Store {
     }
 
     /// Delete-for-everyone keeps a durable tombstone and removes searchable text.
+    ///
+    /// Point-to-point chats allow the original sender only; a group admin gets
+    /// additional authority through [`Store::admin_tombstone_in_group`].
     pub fn tombstone_message(&mut self, id: Uuid, sender: &str) -> Result<bool, String> {
         let transaction = self.connection.transaction().map_err(|e| e.to_string())?;
+        let owner: Option<String> = transaction
+            .query_row(
+                "SELECT sender FROM messages WHERE id = ?1",
+                params![id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        let Some(owner) = owner else {
+            return Ok(false);
+        };
+        // The authority rule and the permanence rule both come from `rules`.
+        if rules::tombstone_authority(&owner, sender, None).is_err() {
+            return Ok(false);
+        }
         let changed = transaction
             .execute(
                 "UPDATE messages SET body = '', tombstone = 1 WHERE id = ?1 AND sender = ?2 AND tombstone = 0",

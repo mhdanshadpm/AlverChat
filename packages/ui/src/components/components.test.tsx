@@ -1,6 +1,51 @@
 import { describe, expect, it } from 'vitest';
 import { placeContextMenu } from '../menu';
 import {
+  CHORD_MODIFIERS,
+  NON_TRIGGER_KEYS,
+  chordFromEvent,
+  displayChord,
+  formatChord,
+  isCompleteChord,
+  isModifierKey,
+  parseChord,
+  platformChord,
+  triggerKeyFor,
+} from './HotkeyRecorder';
+import {
+  THEME_OPTIONS,
+  themedOptions,
+  themeChoiceFor,
+  themeTabIndex,
+} from './ThemeCards';
+import {
+  WEEKDAY_DAYS,
+  isEveryDay,
+  isWeekdaysOnly,
+  orderDays,
+  toggleDay,
+  weekendDays,
+} from './WeekdayPicker';
+import {
+  APP_VERSION,
+  CATEGORY_ICONS,
+  CATEGORY_ORDER,
+  adapterOptions,
+  clockLabel,
+  cornerValueFor,
+  dateLabel,
+  deviceOptions,
+  fileNameFor,
+  hotkeyDisplay,
+  hotkeyForPlatform,
+  hourOptions,
+  numberOptions,
+  paletteColorFor,
+  percentLabel,
+  secondsLabel,
+  withCurrent,
+} from '../screens/SettingsScreen';
+import {
   AVATAR_PALETTE,
   MAX_COMPOSITE_MEMBERS,
   MENU_WIDTH,
@@ -329,5 +374,310 @@ describe('roving focus helpers', () => {
     expect(typeaheadIndex(labels, 'zz')).toBe(-1);
     expect(typeaheadIndex(labels, '  ')).toBe(-1);
     expect(typeaheadIndex([], 'a')).toBe(-1);
+  });
+});
+
+/* ================================================================== *
+ * Settings-screen controls: ThemeCards, WeekdayPicker, HotkeyRecorder
+ * plus the pure helpers SettingsScreen exports.
+ * ================================================================== */
+
+describe('ThemeCards logic', () => {
+  it('keeps the board order Light, Dark, System', () => {
+    expect(THEME_OPTIONS.map((option) => option.value)).toEqual(['light', 'dark', 'system']);
+    expect(THEME_OPTIONS.map((option) => option.label)).toEqual(['Light', 'Dark', 'System']);
+  });
+
+  it('applies caller labels without mutating the shared option list', () => {
+    const labels = themedOptions({ dark: 'Night' });
+    expect(labels.map((option) => option.label)).toEqual(['Light', 'Night', 'System']);
+    expect(labels.map((option) => option.value)).toEqual(['light', 'dark', 'system']);
+    expect(THEME_OPTIONS[1]?.label).toBe('Dark');
+    expect(themedOptions()).toEqual([...THEME_OPTIONS]);
+    expect(themedOptions({})).toEqual([...THEME_OPTIONS]);
+  });
+
+  it('narrows any stored string onto the three real theme values', () => {
+    expect(themeChoiceFor('light')).toBe('light');
+    expect(themeChoiceFor('dark')).toBe('dark');
+    for (const value of ['system', 'gold', '', 'AUTO', undefined, null]) {
+      expect(themeChoiceFor(value as string | null | undefined)).toBe('system');
+    }
+  });
+
+  it('gives exactly one card a roving tabindex of 0', () => {
+    expect(themeTabIndex('light', THEME_OPTIONS)).toBe(0);
+    expect(themeTabIndex('dark', THEME_OPTIONS)).toBe(1);
+    expect(themeTabIndex('system', THEME_OPTIONS)).toBe(2);
+    // unknown value still focuses the first card, never nothing
+    expect(themeTabIndex('nope' as never, THEME_OPTIONS)).toBe(0);
+    const indexes = THEME_OPTIONS.map((_, index) =>
+      index === themeTabIndex('dark', THEME_OPTIONS) ? 0 : -1,
+    );
+    expect(indexes.filter((value) => value === 0)).toHaveLength(1);
+  });
+});
+
+describe('WeekdayPicker logic', () => {
+  it('offers a Monday-first week, matching the Rust `%a` strings', () => {
+    expect(WEEKDAY_DAYS).toEqual(['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']);
+    expect(WEEKDAY_DAYS).toHaveLength(7);
+  });
+
+  it('splits the weekend out for the presets', () => {
+    expect(weekendDays()).toEqual(['Sat', 'Sun']);
+    expect(weekendDays(['Mon', 'Sun'])).toEqual(['Sun']);
+    expect(weekendDays(['Mon', 'Tue'])).toEqual([]);
+  });
+
+  it('orders any selection back into week order', () => {
+    expect(orderDays(['Sun', 'Fri', 'Mon'])).toEqual(['Mon', 'Fri', 'Sun']);
+    expect(orderDays(['Wed', 'Wed'])).toEqual(['Wed', 'Wed']);
+    expect(orderDays([])).toEqual([]);
+    // unknown days keep their relative order and land last
+    expect(orderDays(['Zzz', 'Tue', 'Aaa'])).toEqual(['Tue', 'Zzz', 'Aaa']);
+  });
+
+  it('toggles one day and always returns a fresh, ordered copy', () => {
+    const selected = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'];
+    expect(toggleDay('Sat', selected)).toEqual(['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']);
+    expect(toggleDay('Mon', selected)).toEqual(['Tue', 'Wed', 'Thu', 'Fri']);
+    expect(toggleDay('Mon', toggleDay('Mon', selected))).toEqual(selected);
+    const source = ['Fri', 'Mon'];
+    expect(toggleDay('Wed', source)).toEqual(['Mon', 'Wed', 'Fri']);
+    expect(source).toEqual(['Fri', 'Mon']);
+  });
+
+  it('detects the two presets the board offers', () => {
+    expect(isEveryDay(WEEKDAY_DAYS)).toBe(true);
+    expect(isEveryDay([...WEEKDAY_DAYS, 'Extra'])).toBe(true);
+    expect(isEveryDay(['Mon'])).toBe(false);
+    expect(isEveryDay([])).toBe(false);
+    expect(isEveryDay([], [])).toBe(false);
+
+    expect(isWeekdaysOnly(['Mon', 'Tue', 'Wed', 'Thu', 'Fri'])).toBe(true);
+    expect(isWeekdaysOnly(['Fri', 'Wed', 'Mon', 'Thu', 'Tue'])).toBe(true);
+    expect(isWeekdaysOnly(['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'])).toBe(false);
+    expect(isWeekdaysOnly(['Mon', 'Tue', 'Wed', 'Thu'])).toBe(false);
+    expect(isWeekdaysOnly(['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Xyz'])).toBe(false);
+    expect(isWeekdaysOnly([])).toBe(false);
+    expect(isWeekdaysOnly(['Mon'], ['Mon'])).toBe(true);
+  });
+});
+
+describe('HotkeyRecorder chord parsing', () => {
+  it('splits a combo into canonical modifiers plus one trigger key', () => {
+    expect(CHORD_MODIFIERS).toEqual(['CmdOrCtrl', 'Alt', 'Shift']);
+    expect(parseChord('CmdOrCtrl+Alt+S')).toEqual({ modifiers: ['CmdOrCtrl', 'Alt'], key: 'S' });
+    expect(parseChord('Command+Alt+s')).toEqual({ modifiers: ['CmdOrCtrl', 'Alt'], key: 'S' });
+    expect(parseChord('Ctrl+Alt+S')).toEqual({ modifiers: ['CmdOrCtrl', 'Alt'], key: 'S' });
+    expect(parseChord('Option+Shift+K')).toEqual({ modifiers: ['Alt', 'Shift'], key: 'K' });
+    expect(parseChord('super+space')).toEqual({ modifiers: ['CmdOrCtrl'], key: 'Space' });
+    expect(parseChord('Space')).toEqual({ modifiers: [], key: 'Space' });
+    expect(parseChord('  CmdOrCtrl + Alt + E ')).toEqual({ modifiers: ['CmdOrCtrl', 'Alt'], key: 'E' });
+    expect(parseChord('')).toEqual({ modifiers: [], key: '' });
+    expect(parseChord('+++')).toEqual({ modifiers: [], key: '' });
+  });
+
+  it('collapses repeated and aliased modifiers into one canonical order', () => {
+    expect(parseChord('Shift+Alt+CmdOrCtrl+Alt+Ctrl+C')).toEqual({
+      modifiers: ['CmdOrCtrl', 'Alt', 'Shift'],
+      key: 'C',
+    });
+    expect(formatChord({ modifiers: ['Shift', 'Alt', 'CmdOrCtrl'], key: 'V' })).toBe(
+      'CmdOrCtrl+Alt+Shift+V',
+    );
+    expect(formatChord({ modifiers: [], key: 'M' })).toBe('M');
+    expect(formatChord({ modifiers: ['CmdOrCtrl'], key: '' })).toBe('');
+  });
+
+  it('round-trips every spelling through the canonical display form', () => {
+    for (const combo of ['CmdOrCtrl+Alt+S', 'Command+Alt+S', 'Ctrl+Alt+S', 'cmd+option+s']) {
+      expect(displayChord(combo)).toBe('CmdOrCtrl+Alt+S');
+    }
+    expect(displayChord('CmdOrCtrl+Alt+S')).toBe('CmdOrCtrl+Alt+S');
+    expect(displayChord(displayChord('Shift+A'))).toBe(displayChord('Shift+A'));
+    expect(displayChord('')).toBe('');
+    expect(displayChord('Alt')).toBe('');
+  });
+
+  it('refuses modifier-only and navigation keys as trigger keys', () => {
+    expect(isModifierKey('Meta')).toBe(true);
+    expect(isModifierKey('Control')).toBe(true);
+    expect(isModifierKey('S')).toBe(false);
+    for (const key of NON_TRIGGER_KEYS) expect(triggerKeyFor(key)).toBeNull();
+    expect(NON_TRIGGER_KEYS).toContain('Tab');
+    expect(triggerKeyFor('s')).toBe('S');
+    expect(triggerKeyFor(' ')).toBe('Space');
+    expect(triggerKeyFor('F11')).toBe('F11');
+    expect(triggerKeyFor('ArrowUp')).toBeNull();
+  });
+
+  it('builds a chord from a key event and stays silent for modifiers', () => {
+    expect(
+      chordFromEvent({ key: 's', ctrlKey: false, metaKey: true, altKey: true, shiftKey: false }),
+    ).toEqual({ modifiers: ['CmdOrCtrl', 'Alt'], key: 'S' });
+    expect(
+      chordFromEvent({ key: 'Control', ctrlKey: true, metaKey: false, altKey: false, shiftKey: false }),
+    ).toBeNull();
+    expect(
+      chordFromEvent({ key: 'k', ctrlKey: true, metaKey: false, altKey: true, shiftKey: true }),
+    ).toEqual({ modifiers: ['CmdOrCtrl', 'Alt', 'Shift'], key: 'K' });
+    // meta and ctrl both fold into the cross-platform token
+    expect(
+      chordFromEvent({ key: 'e', ctrlKey: true, metaKey: true, altKey: false, shiftKey: false }),
+    ).toEqual({ modifiers: ['CmdOrCtrl'], key: 'E' });
+    expect(formatChord(chordFromEvent({ key: ' ', ctrlKey: true, metaKey: false, altKey: true, shiftKey: false })!)).toBe(
+      'CmdOrCtrl+Alt+Space',
+    );
+  });
+
+  it('resolves CmdOrCtrl per platform and stays parseable by the Rust side', () => {
+    expect(platformChord('CmdOrCtrl+Alt+S', true)).toBe('Command+Alt+S');
+    expect(platformChord('CmdOrCtrl+Alt+S', false)).toBe('Ctrl+Alt+S');
+    expect(platformChord('Ctrl+Alt+S', true)).toBe('Command+Alt+S');
+    expect(platformChord('Alt+Shift+A', true)).toBe('Alt+Shift+A');
+    expect(platformChord('', true)).toBe('');
+    // the keys apps/desktop parse_hotkey() accepts, both platforms
+    for (const key of ['S', 'D', 'C', 'V', 'K', 'A', 'E', 'M', 'Space']) {
+      const combo = `CmdOrCtrl+Alt+${key}`;
+      expect(platformChord(combo, true)).toBe(`Command+Alt+${key}`);
+      expect(platformChord(combo, false)).toBe(`Ctrl+Alt+${key}`);
+      expect(displayChord(platformChord(combo, true))).toBe(combo);
+      expect(displayChord(platformChord(combo, false))).toBe(combo);
+    }
+  });
+
+  it('only calls a combo complete with a modifier and a key', () => {
+    expect(isCompleteChord('CmdOrCtrl+Alt+S')).toBe(true);
+    expect(isCompleteChord('Shift+Space')).toBe(true);
+    for (const combo of ['', 'S', 'Shift', 'CmdOrCtrl', 'Alt+Shift']) {
+      expect(isCompleteChord(combo)).toBe(false);
+    }
+  });
+});
+
+describe('SettingsScreen helpers', () => {
+  it('exposes the seven board categories with an icon each', () => {
+    expect(CATEGORY_ORDER).toEqual([
+      'general',
+      'icon',
+      'notifications',
+      'messages',
+      'calls',
+      'privacy',
+      'about',
+    ]);
+    expect(Object.keys(CATEGORY_ICONS).sort()).toEqual([...CATEGORY_ORDER].sort());
+    expect(APP_VERSION).toBe('0.1.0');
+  });
+
+  it('formats slider read-outs', () => {
+    expect(secondsLabel(5)).toBe('5 s');
+    expect(secondsLabel(0)).toBe('0 s');
+    expect(percentLabel(90)).toBe('90%');
+    expect(percentLabel(100)).toBe('100%');
+  });
+
+  it('keeps only real corner values and falls back to the Rust default', () => {
+    for (const corner of [
+      'left-top',
+      'left-center',
+      'left-bottom',
+      'right-top',
+      'right-center',
+      'right-bottom',
+    ]) {
+      expect(cornerValueFor(corner)).toBe(corner);
+    }
+    expect(cornerValueFor('top')).toBe('right-center');
+    expect(cornerValueFor('')).toBe('right-center');
+  });
+
+  it('passes unparsable clock values through untouched and formats real ones', () => {
+    for (const bad of ['24:00', '07:60', 'abc', '07', '']) {
+      expect(clockLabel(bad)).toBe(bad);
+    }
+    expect(clockLabel('13:30:00')).toContain('30');
+    expect(clockLabel('07:00')).toContain('00');
+    expect(hourOptions()).toHaveLength(24);
+    expect(hourOptions().map((option) => option.value)).toContain('00:00');
+    expect(hourOptions()[23]?.value).toBe('23:00');
+    for (const option of hourOptions()) {
+      expect(/^\d{2}:00$/.test(option.value)).toBe(true);
+      expect(option.label.length).toBeGreaterThan(0);
+    }
+    expect(dateLabel(0)).toContain('1970');
+  });
+
+  it('turns numbers into dropdown choices', () => {
+    expect(numberOptions([0, 1, 5], (value) => `${value} min`)).toEqual([
+      { value: '0', label: '0 min' },
+      { value: '1', label: '1 min' },
+      { value: '5', label: '5 min' },
+    ]);
+    expect(numberOptions([], String)).toEqual([]);
+  });
+
+  it('lists devices behind a Default entry and keeps unknown ids selectable', () => {
+    const devices = [
+      { deviceId: 'mic-1', kind: 'audioinput', label: ' MacBook Mic ' },
+      { deviceId: 'spk-1', kind: 'audiooutput', label: 'Speakers' },
+      { deviceId: '', kind: 'audioinput', label: 'No id' },
+      { deviceId: 'anon', kind: 'audioinput', label: '   ' },
+      { deviceId: 'cam', kind: 'videoinput', label: 'FaceTime' },
+    ] as unknown as MediaDeviceInfo[];
+    expect(deviceOptions(devices, 'audioinput', 'Default microphone')).toEqual([
+      { value: 'default', label: 'Default microphone' },
+      { value: 'mic-1', label: ' MacBook Mic ' },
+    ]);
+    expect(deviceOptions(devices, 'videoinput', 'Default camera')).toHaveLength(2);
+    expect(deviceOptions([], 'audiooutput', 'Default speakers')).toEqual([
+      { value: 'default', label: 'Default speakers' },
+    ]);
+
+    const base = [{ value: 'mic-1', label: 'MacBook Mic' }];
+    expect(withCurrent(base, 'mic-1', 'x')).toEqual(base);
+    expect(withCurrent(base, 'default', 'x')).toEqual(base);
+    expect(withCurrent(base, '', 'x')).toEqual(base);
+    expect(withCurrent(base, 'mic-9', 'USB Headset')).toEqual([
+      ...base,
+      { value: 'mic-9', label: 'USB Headset' },
+    ]);
+    const source = [{ value: 'a', label: 'A' }];
+    const copy = withCurrent(source, 'a', 'A');
+    copy.push({ value: 'b', label: 'B' });
+    expect(source).toHaveLength(1);
+  });
+
+  it('always offers the automatic adapter first', () => {
+    expect(adapterOptions(['Wi-Fi (192.168.1.88)'], 'Automatic')).toEqual([
+      { value: 'auto', label: 'Automatic' },
+      { value: 'Wi-Fi (192.168.1.88)', label: 'Wi-Fi (192.168.1.88)' },
+    ]);
+    expect(adapterOptions([], 'Automatic')).toHaveLength(1);
+  });
+
+  it('reads the last path segment on either separator', () => {
+    expect(fileNameFor('/Users/anshad/Backups/alverchat.tar')).toBe('alverchat.tar');
+    expect(fileNameFor('C:\\Users\\anshad\\backup.zip')).toBe('backup.zip');
+    expect(fileNameFor('backup.zip')).toBe('backup.zip');
+    expect(fileNameFor('')).toBe('');
+    expect(fileNameFor('a/b/')).toBe('b');
+  });
+
+  it('maps avatar colours onto the palette only', () => {
+    for (const color of AVATAR_PALETTE) expect(paletteColorFor(color)).toBe(color);
+    expect(paletteColorFor('magenta')).toBeUndefined();
+    expect(paletteColorFor(undefined)).toBeUndefined();
+    expect(paletteColorFor('')).toBeUndefined();
+  });
+
+  it('displays chords canonically but stores them per platform', () => {
+    expect(hotkeyDisplay('Command+Alt+S')).toBe('CmdOrCtrl+Alt+S');
+    expect(hotkeyDisplay('Ctrl+Alt+S')).toBe('CmdOrCtrl+Alt+S');
+    expect(hotkeyDisplay('')).toBe('');
+    expect(hotkeyForPlatform('CmdOrCtrl+Alt+S', true)).toBe('Command+Alt+S');
+    expect(hotkeyForPlatform('CmdOrCtrl+Alt+S', false)).toBe('Ctrl+Alt+S');
   });
 });

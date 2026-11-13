@@ -2,6 +2,7 @@
 
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::{identity::Identity, peer_id};
 
@@ -134,6 +135,113 @@ impl GroupState {
     }
 }
 
+/// One recipient of a group fan-out, ready to become an outbox row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeliveryTarget {
+    /// Peer that must receive the envelope.
+    pub recipient: String,
+    /// Chat the envelope belongs to, normally the group id.
+    pub chat_id: String,
+    /// Roster epoch the envelope was fanned out under.
+    pub epoch: u64,
+    /// Deterministic per-recipient outbox row id.
+    pub outbox_id: Uuid,
+}
+
+impl DeliveryTarget {
+    #[must_use]
+    pub fn new(recipient: &str, chat_id: &str, epoch: u64, envelope_id: Uuid) -> Self {
+        Self {
+            recipient: recipient.to_owned(),
+            chat_id: chat_id.to_owned(),
+            epoch,
+            outbox_id: derive_outbox_id(envelope_id, recipient),
+        }
+    }
+}
+
+/// Deterministic outbox row id for one logical envelope and one recipient.
+///
+/// A group message is one logical message but many transports, so each recipient needs a
+/// unique row id while the payload keeps carrying the original message id. blake3 over
+/// `(envelope id, recipient)` gives the same id on every device and on every retry.
+#[must_use]
+pub fn derive_outbox_id(envelope_id: Uuid, recipient: &str) -> Uuid {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(envelope_id.as_bytes());
+    hasher.update(recipient.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest.as_bytes()[..16]);
+    Uuid::from_bytes(bytes)
+}
+
+/// Pure fan-out: sorted, deduplicated recipients, never the sender.
+///
+/// The sender already holds their own copy, so echoing a group message back to them would
+/// duplicate it in the UI and re-encrypt it for nothing. Empty identifiers are dropped so a
+/// half-opened peer row cannot produce a delivery that no one can acknowledge.
+#[must_use]
+pub fn fan_out<I, S>(member_ids: I, sender_id: &str) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut recipients: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for member in member_ids {
+        let member = member.as_ref();
+        if member.is_empty() || member == sender_id {
+            continue;
+        }
+        recipients.insert(member.to_owned());
+    }
+    recipients.into_iter().collect()
+}
+
+impl GroupState {
+    /// True when `peer_id` is on the signed roster.
+    #[must_use]
+    pub fn is_member(&self, peer_id: &str) -> bool {
+        self.members.iter().any(|member| member == peer_id)
+    }
+
+    /// True when `peer_id` holds the signing admin role of this group.
+    #[must_use]
+    pub fn is_admin(&self, peer_id: &str) -> bool {
+        self.admin == peer_id
+    }
+
+    /// Recipients for a group message sent by `sender_id`.
+    #[must_use]
+    pub fn fan_out(&self, sender_id: &str) -> Vec<String> {
+        fan_out(&self.members, sender_id)
+    }
+
+    /// Per-member delivery plan for the outbox, excluding the sender.
+    #[must_use]
+    pub fn delivery_plan(&self, sender_id: &str, envelope_id: Uuid) -> Vec<DeliveryTarget> {
+        delivery_plan_for(&self.members, sender_id, &self.id, self.epoch, envelope_id)
+    }
+}
+
+/// Build a [`DeliveryTarget`] per recipient for any roster shape.
+///
+/// Used by the Everyone group, whose roster comes from discovered peers instead of a
+/// signed [`GroupState`].
+#[must_use]
+pub fn delivery_plan_for(
+    member_ids: &[String],
+    sender_id: &str,
+    chat_id: &str,
+    epoch: u64,
+    envelope_id: Uuid,
+) -> Vec<DeliveryTarget> {
+    fan_out(member_ids, sender_id)
+        .into_iter()
+        .map(|recipient| DeliveryTarget::new(&recipient, chat_id, epoch, envelope_id))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,5 +312,105 @@ mod tests {
         );
         group.name = "Renamed".into();
         assert!(!group.verify());
+    }
+
+    #[test]
+    fn fan_out_excludes_the_sender_and_is_deterministic() {
+        let admin = Identity::from_secret([11; 32]);
+        let member = Identity::from_secret([12; 32]);
+        let group = GroupState::create(
+            &admin,
+            "group-fan".into(),
+            "Design".into(),
+            [member.peer_id(), "peer-c".into()],
+        )
+        .unwrap();
+        let recipients = group.fan_out(&admin.peer_id());
+        assert!(!recipients.contains(&admin.peer_id()), "no self delivery");
+        assert!(recipients.contains(&member.peer_id()));
+        assert!(recipients.contains(&"peer-c".into()));
+        assert_eq!(recipients, group.fan_out(&admin.peer_id()));
+        // A member sending is fanned out to everybody else, including the admin.
+        let from_member = group.fan_out(&member.peer_id());
+        assert_eq!(from_member.len(), recipients.len());
+        assert!(from_member.contains(&admin.peer_id()));
+        assert!(!from_member.contains(&member.peer_id()));
+        // Duplicates, blanks and the sender are all dropped, order is sorted.
+        let messy = fan_out(
+            ["zed".to_owned(), "abc".to_owned(), "zed".to_owned(), String::new(), "abc".to_owned()],
+            "zed",
+        );
+        assert_eq!(messy, vec!["abc".to_owned()]);
+        assert!(fan_out(std::iter::empty::<String>(), "anyone").is_empty());
+        assert!(group.fan_out("not-even-a-member").len() == group.members.len());
+    }
+
+    #[test]
+    fn delivery_plan_gives_every_recipient_its_own_outbox_row() {
+        let admin = Identity::from_secret([13; 32]);
+        let member = Identity::from_secret([14; 32]);
+        let group = GroupState::create(
+            &admin,
+            "group-plan".into(),
+            "Standup".into(),
+            [member.peer_id(), "peer-d".into()],
+        )
+        .unwrap();
+        let envelope_id = Uuid::now_v7();
+        let plan = group.delivery_plan(&admin.peer_id(), envelope_id);
+        let expected = vec![member.peer_id(), "peer-d".to_owned()];
+        let listed: Vec<_> = plan.iter().map(|target| target.recipient.clone()).collect();
+        assert_eq!(
+            listed,
+            {
+                let mut sorted = expected.clone();
+                sorted.sort();
+                sorted
+            }
+        );
+        assert_eq!(plan.len(), 2);
+        assert!(plan.iter().all(|target| target.chat_id == group.id));
+        assert!(plan.iter().all(|target| target.epoch == group.epoch));
+        // Row ids are unique per recipient but reproducible for the same envelope.
+        let ids: std::collections::BTreeSet<_> =
+            plan.iter().map(|target| target.outbox_id).collect();
+        assert_eq!(ids.len(), plan.len());
+        assert_eq!(plan, group.delivery_plan(&admin.peer_id(), envelope_id));
+        assert_ne!(
+            plan,
+            group.delivery_plan(&admin.peer_id(), Uuid::now_v7()),
+            "a different envelope gets different rows"
+        );
+        assert_eq!(
+            derive_outbox_id(envelope_id, "peer-d"),
+            plan[1].outbox_id,
+            "row ids are derived, not random"
+        );
+        assert!(group
+            .delivery_plan(&member.peer_id(), envelope_id)
+            .iter()
+            .all(|target| target.recipient != member.peer_id()));
+    }
+
+    #[test]
+    fn everyone_plan_uses_the_discovered_peer_roster() {
+        let local = Identity::from_secret([15; 32]);
+        let peer = Identity::from_secret([16; 32]);
+        let roster = crate::rules::everyone_roster(&[local.peer_id(), peer.peer_id()]);
+        assert_eq!(roster.len(), 2);
+        let envelope_id = Uuid::now_v7();
+        let plan = delivery_plan_for(&roster, &local.peer_id(), EVERYONE_GROUP_ID, 1, envelope_id);
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].recipient, peer.peer_id());
+        assert_eq!(plan[0].chat_id, EVERYONE_GROUP_ID);
+        assert_eq!(plan[0].epoch, 1);
+        assert!(GroupState::create(
+            &local,
+            EVERYONE_GROUP_ID.into(),
+            "Everyone".into(),
+            std::iter::empty(),
+        )
+        .unwrap()
+        .is_admin(&local.peer_id()));
     }
 }

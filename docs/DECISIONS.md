@@ -29,3 +29,14 @@
 - Save dock monitor name, edge, and vertical percentage in the app configuration directory; restore to the saved monitor when available and primary display otherwise.
 - Snap on release when edge snapping is enabled or the icon is within 24 logical pixels; honor system reduced-motion preference.
 - Use Rust geometry helpers with unit coverage for drag threshold, clamping, snapping, percentage restore, bubble side, and panel attachment.
+
+## Phase 5 shell and screens — 2026-11-13 19:57
+
+- Continue on `main` instead of creating `build/v1`, because the published repository history and the pushed checkpoint tags already live there; creating the branch mid-build would fork the release lineage for no benefit.
+- Resample only `--danger` (to #eb453d) and leave `--text` and `--accent2` at their existing values: the cross-board spread for those two tokens is 16.7 and 15.4, and the boards disagree per-screen rather than showing one intended value.
+- The onboarding gate is one-time per bridge load, keyed on `identity.peerId` being absent, so a peer with an empty display name is not forced back into onboarding on every start.
+- `ChatList.onOpenNetwork` lands on the Settings view generally, not on its network category, because `SettingsScreen` owns the category state internally and exposing it would widen the screen contract for one link.
+- Reply quoting is kept in the mock bridge and dropped by the desktop shell: `messages` has no `reply_to` column, and Tauri v2 ignores the extra `replyToId` argument, so the UI stays honest rather than pretending persistence. Silently continuing to quote in mock is intentional so the design state remains reviewable. Until migration v5 lands.
+- Narrow windows use the `mobile-chat` class to swap list and conversation panes; the designs only show the three-pane desktop layout, so this is the closest reading of the existing `.app` grid.
+- Every call CTA toasts "unavailable until LAN call signaling is connected" while `listCalls` history renders for real, so the Calls screen shows what exists without advertising what does not.
+- The shell refreshes a thread through a `revision` counter bumped by `messages-changed`, with a `seenRevision` guard plus `key={chat.id}`, because a per-chat event subscription would re-subscribe on every chat switch.

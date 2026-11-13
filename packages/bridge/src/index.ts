@@ -19,6 +19,38 @@ export type Group = {
 };
 export type GroupPatch = { name?:string; description?:string; icon?:string };
 
+/** File transfers travel over the same encrypted session as messages. */
+export type AttachmentKind = 'image'|'video'|'audio'|'file';
+export type TransferState = 'idle'|'queued'|'uploading'|'downloading'|'paused'|'done'|'failed'|'cancelled';
+export type Attachment = {
+  id:string;
+  chatId:string;
+  /** The text message this transfer belongs to, when it was sent with a caption. */
+  messageId?:string;
+  kind:AttachmentKind;
+  name:string;
+  bytes:number;
+  mime:string;
+  state:TransferState;
+  /** 0-1 while a transfer is running; `null` once complete. */
+  progress:number|null;
+  transferRateBytesPerSecond:number;
+  /** Set when the app auto-downloaded a small file to keep traffic low. */
+  autoDownloaded?:boolean;
+  /** Local `asset:` or data URL for previews; `null` until the bytes arrive. */
+  previewUrl?:string|null;
+  durationMs?:number;
+};
+
+/** One emoji with the senders behind it, so reactions render without a second round trip. */
+export type ReactionTally = { emoji:string; peers:string[]; mine:boolean };
+export type PinnedMessage = { messageId:string; chatId:string; sender:string; text:string; pinnedMs:number; pinnedBy:string };
+export type Announcement = { id:string; groupId:string; author:string; authorName:string; text:string; createdMs:number; acknowledgedBy:string[] };
+export type CallStatus = 'missed'|'declined'|'ended'|'ringing'|'ongoing'|'failed';
+export type CallEvent = { id:string; chatId:string; kind:'1to1'|'group'; status:CallStatus; caller:string; callerName:string; startedMs:number; endedMs:number|null; participants:string[] };
+export type SearchHit = { chatId:string; chatName:string; messageId:string; sender:string; text:string; timestampMs:number };
+export type UnreadState = { chatId:string; unread:number; firstUnreadId:string|null };
+
 /** Mirrors `platform::AppSettings` in the desktop shell. */
 export type AppSettings = {
   theme:'light'|'dark'|'system';
@@ -44,6 +76,8 @@ export type AppSettings = {
   dndFrom:string;
   dndTo:string;
   mutedChats:string[];
+  /** Chats pinned to the top of the list, in the order they were pinned. */
+  pinnedChats:string[];
   showMessagePreview:boolean;
   editWindowMinutes:number;
   autoDownloadLimitMb:number;
@@ -69,7 +103,8 @@ export type ExportResult = { path:string; messages:number };
 export interface PlatformBridge {
   listPeers(): Promise<Peer[]>;
   listMessages(chatId:string): Promise<ChatMessage[]>;
-  sendMessage(chatId:string,text:string): Promise<ChatMessage>;
+  /** `replyToId` quotes an earlier message; the desktop shell ignores it until storage has a column. */
+  sendMessage(chatId:string,text:string,replyToId?:string): Promise<ChatMessage>;
   overlaySnapshot(): Promise<OverlaySnapshot>;
   toggleCompact(): Promise<void>;
   hideCompact(): Promise<void>;
@@ -88,6 +123,8 @@ export interface PlatformBridge {
   setBubbleSettings(enabled:boolean,autoHideSeconds:number): Promise<void>;
   markAsRead(chatId:string): Promise<void>;
   deleteMessageLocal(messageId:string): Promise<boolean>;
+  /** Unsends for every participant; only the original sender may do it, inside the edit window. */
+  deleteForEveryone(messageId:string): Promise<boolean>;
   editMessageLocal(messageId:string,text:string): Promise<boolean>;
   getMyIdentity(): Promise<{ peerId: string; fingerprint: string }>;
   getSettings(): Promise<AppSettings>;
@@ -106,7 +143,32 @@ export interface PlatformBridge {
   restoreBackup(path:string,passphrase:string): Promise<void>;
   exportData(): Promise<ExportResult>;
   revealPath(path:string): Promise<void>;
+  /** Message-level richness. Every one of these is local-only until the peer answers. */
+  pinMessage(chatId:string, messageId:string, pinned:boolean): Promise<PinnedMessage[]>;
+  pinnedMessages(chatId:string): Promise<PinnedMessage[]>;
+  starMessage(messageId:string, starred:boolean): Promise<boolean>;
+  starredMessages(chatId:string): Promise<ChatMessage[]>;
+  reactionsFor(messageId:string): Promise<ReactionTally[]>;
+  /** Toggles the caller's own reaction; sending the same emoji again removes it. */
+  react(messageId:string, emoji:string): Promise<ReactionTally[]>;
+  /** Copies messages into other conversations as new outgoing messages; returns how many landed. */
+  forwardMessages(messageIds:string[], chatIds:string[]): Promise<number>;
+  searchMessages(query:string, chatId?:string): Promise<SearchHit[]>;
+  setTyping(chatId:string, typing:boolean): Promise<void>;
+  markUnread(chatId:string): Promise<UnreadState[]>;
+  clearChat(chatId:string): Promise<void>;
+  deleteChat(chatId:string): Promise<void>;
+  attachmentsFor(chatId:string): Promise<Attachment[]>;
+  /** `dataUrl` is base64 only for small files; larger transfers stream from disk. */
+  sendFile(chatId:string, fileName:string, dataUrl:string): Promise<Attachment>;
+  controlTransfer(attachmentId:string, action:'pause'|'resume'|'retry'|'cancel'): Promise<Attachment|null>;
+  openAttachment(attachmentId:string): Promise<string|null>;
+  listAnnouncements(groupId:string): Promise<Announcement[]>;
+  sendAnnouncement(groupId:string, text:string): Promise<Announcement>;
+  acknowledgeAnnouncement(announcementId:string): Promise<Announcement|null>;
+  listCalls(chatId?:string): Promise<CallEvent[]>;
   setMutedChat(chatId:string,muted:boolean): Promise<string[]>;
+  setPinnedChat(chatId:string,pinned:boolean): Promise<string[]>;
   listGroups(): Promise<Group[]>;
   createGroup(name:string, memberIds:string[], icon?:string): Promise<Group>;
   updateGroup(id:string, patch:GroupPatch): Promise<Group>;
@@ -124,7 +186,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   iconMorphEnabled:true, iconMorphDelaySeconds:5, bubbleAutoHideSeconds:7,
   screenCorner:'right-center', opacityPercent:90, snapToEdge:true,
   hotkey:'Ctrl+Alt+S', notificationSound:true, notificationsMuted:false, dndEnabled:true,
-  dndDays:['Mon','Tue','Wed','Thu','Fri'], dndFrom:'22:00', dndTo:'07:00', mutedChats:[],
+  dndDays:['Mon','Tue','Wed','Thu','Fri'], dndFrom:'22:00', dndTo:'07:00', mutedChats:[], pinnedChats:[],
   showMessagePreview:true, editWindowMinutes:15, autoDownloadLimitMb:50, maxFileSizeMb:500,
   downloadsDir:'', microphone:'default', speaker:'default', camera:'default',
   noiseSuppression:true, echoCancellation:true, ringtone:'alverchat', lanEncryption:false,
@@ -157,6 +219,7 @@ export const emptyBrowserBridge:PlatformBridge = {
  async setBubbleSettings(){/* browser preview */},
  async markAsRead(){/* browser preview */},
  async deleteMessageLocal(){return true},
+ async deleteForEveryone(){return true},
  async editMessageLocal(){return true},
  async getMyIdentity(){return { peerId: 'browser-preview', fingerprint: 'preview-fingerprint' }},
  async getSettings(){return {...DEFAULT_SETTINGS}},
@@ -176,6 +239,7 @@ export const emptyBrowserBridge:PlatformBridge = {
  async exportData(){return unavailable('Export')},
  async revealPath(){/* browser preview */},
  async setMutedChat(_chatId,muted){return muted?['muted']:[]},
+ async setPinnedChat(_chatId,pinned){return pinned?['pinned']:[]},
  async listGroups(){return []},
  async createGroup(){return unavailable('Groups')},
  async updateGroup(){return unavailable('Groups')},
@@ -184,6 +248,26 @@ export const emptyBrowserBridge:PlatformBridge = {
  async leaveGroup(){return unavailable('Groups')},
  async setAvatar(){return null},
  async getAvatar(){return null},
+ async pinMessage(){return []},
+ async pinnedMessages(){return []},
+ async starMessage(){return true},
+ async starredMessages(){return []},
+ async reactionsFor(){return []},
+ async react(){return []},
+ async forwardMessages(){return 0},
+ async searchMessages(){return []},
+ async setTyping(){/* browser preview */},
+ async markUnread(){return []},
+ async clearChat(){/* browser preview */},
+ async deleteChat(){/* browser preview */},
+ async attachmentsFor(){return []},
+ async sendFile(){return unavailable('File transfers')},
+ async controlTransfer(){return null},
+ async openAttachment(){return null},
+ async listAnnouncements(){return []},
+ async sendAnnouncement(){return unavailable('Announcements')},
+ async acknowledgeAnnouncement(){return null},
+ async listCalls(){return []},
 };
 
 export async function bridgeForRuntime():Promise<PlatformBridge>{

@@ -47,6 +47,8 @@ pub struct AppSettings {
     pub dnd_from: String,
     pub dnd_to: String,
     pub muted_chats: Vec<String>,
+    /// Chats the user pinned to the top of the list, in pin order.
+    pub pinned_chats: Vec<String>,
     pub show_message_preview: bool,
     // Messages
     pub edit_window_minutes: u32,
@@ -97,6 +99,7 @@ impl Default for AppSettings {
             dnd_from: "22:00".into(),
             dnd_to: "07:00".into(),
             muted_chats: Vec::new(),
+            pinned_chats: Vec::new(),
             show_message_preview: true,
             edit_window_minutes: 15,
             auto_download_limit_mb: 50,
@@ -857,6 +860,21 @@ pub fn set_muted_chat(app: AppHandle, chat_id: String, muted: bool) -> Result<Ve
     }
     persist(&app, &guard)?;
     Ok(guard.muted_chats.clone())
+}
+
+#[tauri::command]
+pub fn set_pinned_chat(app: AppHandle, chat_id: String, pinned: bool) -> Result<Vec<String>, String> {
+    let state = app.state::<SettingsState>();
+    let mut guard = state
+        .0
+        .lock()
+        .map_err(|_| "settings lock poisoned".to_string())?;
+    guard.pinned_chats.retain(|id| id != &chat_id);
+    if pinned {
+        guard.pinned_chats.push(chat_id);
+    }
+    persist(&app, &guard)?;
+    Ok(guard.pinned_chats.clone())
 }
 
 #[cfg(test)]

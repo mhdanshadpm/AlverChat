@@ -125,6 +125,43 @@
   --ac-group-cyan-b: #2ba9b8;
   --ac-group-yellow-a: #ffd47e;
   --ac-group-yellow-b: #eaa62c;
+
+  /* --- settings-board controls (ThemeCards / WeekdayPicker / HotkeyRecorder) -
+     The ThemeCards previews deliberately keep a fixed light/dark pair so a card
+     always shows the appearance it stands for, in either theme. */
+  --ac-theme-light-bg: #e9ebf7;
+  --ac-theme-light-fill: #cdd2e6;
+  --ac-theme-dark-bg: #232741;
+  --ac-theme-dark-fill: #3b415f;
+  --ac-theme-accent: var(--accent2);
+
+  /* --- settings layout geometry ------------------------------------------ */
+  --ac-settings-rail: 244px;
+  --ac-settings-width: 780px;
+  --ac-settings-gap: 18px;
+  --ac-settings-pad: 16px;
+  --ac-settings-block: 14px;
+  --ac-field-width-sm: 118px;
+  --ac-field-width-md: 210px;
+  --ac-field-width-lg: 280px;
+  --ac-chip-height: 30px;
+  --ac-swatch-height: 74px;
+  --ac-card-width: 148px;
+  --ac-slider-width: 190px;
+  --ac-font-title: 17px;
+  --ac-font-h2: 15px;
+  --ac-font-body: 13px;
+
+  /* --- settings spacing scale (theme-independent lengths, so no .dark copy) -
+     Lets the Settings screen express every gap, hairline and dot in tokens. */
+  --ac-space-2xs: 4px;
+  --ac-space-xs: 6px;
+  --ac-space-sm: 8px;
+  --ac-hairline: 1px;
+  --ac-dot-size: 8px;
+  --ac-settings-pad-y: 9px;
+  --ac-label-tracking: 1px;
+  --ac-settings-list-height: 260px;
 }
 
 .dark {
@@ -157,6 +194,11 @@
   --ac-thumb-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
   --ac-slider-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
   --ac-toast-shadow: 0 9px 25px rgba(0, 0, 0, 0.55);
+
+  /* ThemeCards: the light preview stays light in either theme (board frame 2-4),
+     the dark preview tracks this app's real dark surface. */
+  --ac-theme-dark-bg: #1b1e30;
+  --ac-theme-dark-fill: #333956;
 }
 
 /* ==========================================================================
@@ -2484,4 +2526,217 @@ button.ac-row {
 /* --- Waveform ---------------------------------------------------------------- */
 .ac-waveform__bar {
   height: 100%;
+}
+
+/* ==========================================================================
+   Settings-board controls: ThemeCards, WeekdayPicker, HotkeyRecorder
+   (design/AlverChat_Settings_Design_System.png — General / Notifications /
+   Floating Icon & Bubbles). Ships with packages/ui/src/screens/SettingsScreen.tsx.
+   ========================================================================== */
+
+/* --- ThemeCards ------------------------------------------------------------- */
+.ac-themecards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(var(--ac-card-width), 1fr));
+  gap: var(--ac-settings-gap);
+  width: 100%;
+}
+.ac-themecard {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--ac-settings-block);
+  padding: var(--ac-settings-pad);
+  border: 1px solid var(--line);
+  border-radius: var(--ac-radius-lg);
+  background: var(--surface);
+  box-shadow: var(--ac-soft-shadow);
+  cursor: pointer;
+  font: inherit;
+  text-align: center;
+  transition: border-color var(--ac-motion) var(--ac-ease),
+    box-shadow var(--ac-motion) var(--ac-ease), background var(--ac-motion) var(--ac-ease);
+}
+.ac-themecard:hover:not(:disabled):not(.ac-themecard--on) {
+  border-color: var(--accent2);
+}
+.ac-themecard--on {
+  border-color: var(--accent);
+  box-shadow: var(--ac-ring-shadow);
+}
+.ac-themecard:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.ac-themecard:focus-visible {
+  outline: 2px solid var(--ac-focus);
+  outline-offset: 2px;
+}
+.ac-themecard__swatch {
+  display: block;
+  width: 100%;
+  height: var(--ac-swatch-height);
+  border: 1px solid var(--line);
+  border-radius: var(--ac-radius-md);
+  overflow: hidden;
+}
+.ac-themecard__svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.ac-themecard__label {
+  font-size: var(--ac-font-label);
+  font-weight: 700;
+  color: var(--muted);
+}
+.ac-themecard--on .ac-themecard__label {
+  color: var(--text);
+}
+.ac-themecard__check {
+  position: absolute;
+  top: calc(var(--ac-settings-gap) * -0.5);
+  right: calc(var(--ac-settings-gap) * -0.5);
+  display: grid;
+  place-items: center;
+  width: var(--ac-icon-size);
+  height: var(--ac-icon-size);
+  border: 2px solid var(--surface);
+  border-radius: var(--ac-radius-pill);
+  background: var(--accent);
+  color: var(--ac-on-accent);
+  box-shadow: var(--ac-accent-glow);
+}
+
+/* --- WeekdayPicker ---------------------------------------------------------- */
+.ac-weekdays {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.ac-weekdays__chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--ac-chip-height);
+  height: var(--ac-chip-height);
+  padding: 0 var(--ac-settings-gap);
+  border: 1px solid var(--line);
+  border-radius: var(--ac-radius-sm);
+  background: var(--surface-2);
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--ac-font-xs);
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--ac-motion) var(--ac-ease), color var(--ac-motion) var(--ac-ease),
+    border-color var(--ac-motion) var(--ac-ease);
+}
+.ac-weekdays__chip:hover:not(.ac-weekdays__chip--on):not(:disabled) {
+  background: var(--ac-hover);
+  color: var(--ac-hover-text);
+}
+.ac-weekdays__chip--on {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--ac-on-accent);
+  font-weight: 700;
+}
+.ac-weekdays__chip:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.ac-weekdays__chip:focus-visible {
+  outline: 2px solid var(--ac-focus);
+  outline-offset: 2px;
+}
+
+/* --- HotkeyRecorder --------------------------------------------------------- */
+.ac-hotkey {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  max-width: var(--ac-field-width-md);
+}
+.ac-hotkey__field {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  min-height: var(--ac-control-md);
+  padding: 0 var(--ac-settings-gap);
+  border: 1px solid var(--line);
+  border-radius: var(--ac-radius-sm);
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--ac-font-xs);
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color var(--ac-motion) var(--ac-ease), box-shadow var(--ac-motion) var(--ac-ease);
+}
+.ac-hotkey__field:hover:not(:disabled) {
+  border-color: var(--accent2);
+}
+.ac-hotkey--recording .ac-hotkey__field,
+.ac-hotkey--pending .ac-hotkey__field {
+  border-color: var(--accent2);
+  box-shadow: var(--ac-ring-shadow);
+}
+.ac-hotkey__field:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.ac-hotkey__field:focus-visible {
+  outline: 2px solid var(--ac-focus);
+  outline-offset: 2px;
+}
+.ac-hotkey__value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ac-hotkey__value--empty {
+  color: var(--muted);
+  font-weight: 400;
+}
+/* Screen-reader-only live region: announces "Recording…" without a second
+   visible label, so the standard visually-hidden box is intentional. */
+.ac-hotkey__state {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+.ac-hotkey__clear {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: var(--ac-control-sm);
+  height: var(--ac-control-sm);
+  border: 0;
+  border-radius: var(--ac-radius-xs);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0;
+}
+.ac-hotkey__clear:hover:not(:disabled) {
+  background: var(--ac-hover);
+  color: var(--ac-hover-text);
+}
+.ac-hotkey__clear:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.ac-hotkey__clear:focus-visible {
+  outline: 2px solid var(--ac-focus);
+  outline-offset: 2px;
 }

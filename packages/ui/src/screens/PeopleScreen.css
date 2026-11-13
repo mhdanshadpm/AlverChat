@@ -1,0 +1,295 @@
+/* ==========================================================================
+   PeopleScreen — "People on your network" (spec 7.2 / board 1.3).
+   Every colour, radius, font and control size comes from a styles.css base
+   token or an --ac-* component token; the only arithmetic is calc() on those
+   tokens. `pp-` keeps these rules clear of the ac- component library.
+   ========================================================================== */
+
+.pp {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ac-settings-block);
+  width: 100%;
+  max-width: var(--ac-settings-width);
+  min-width: 0;
+  margin: 0 auto;
+}
+
+/* ===== Toolbar: search + segmented filter ================================ */
+
+.pp-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--ac-settings-gap);
+  flex-wrap: wrap;
+}
+
+.pp-search {
+  flex: 1 1 var(--ac-field-width-lg);
+  min-width: 0;
+  height: var(--ac-control-lg);
+  background: var(--surface);
+}
+
+.pp-toolbar [role='tablist'] {
+  flex: 0 0 auto;
+}
+
+/* ===== Discovered count row ============================================== */
+
+.pp-count {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--ac-settings-gap);
+  flex-wrap: wrap;
+  padding-inline: calc(var(--ac-settings-pad) / 2);
+  font-size: var(--ac-font-sm);
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.pp-count__scan {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(var(--ac-settings-pad) / 2);
+  color: var(--accent);
+}
+
+.pp-count__hint {
+  font-size: var(--ac-font-xs);
+  font-weight: 500;
+  color: var(--muted);
+}
+
+/* ===== The peer list ======================================================= */
+
+.pp-list {
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.pp-row {
+  cursor: default;
+}
+
+.pp-row__title {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(var(--ac-settings-pad) / 2);
+  min-width: 0;
+  font-size: var(--ac-font-title);
+  font-weight: 700;
+  color: var(--text);
+}
+
+.pp-row__title > svg {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+.pp-row__typing {
+  font-size: var(--ac-font-xs);
+  font-style: italic;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.pp-row__hint {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--ac-settings-pad) / 2);
+  min-width: 0;
+  font-size: var(--ac-font-xs);
+  color: var(--muted);
+}
+
+.pp-row__device {
+  overflow: hidden;
+  max-width: var(--ac-field-width-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--ac-font-xxs);
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.pp-row__device::after {
+  content: '·';
+  margin-inline-start: calc(var(--ac-settings-pad) / 2);
+  color: var(--line);
+}
+
+.pp-row__status {
+  color: var(--ac-presence-offline);
+  font-weight: 600;
+}
+
+.pp-row__status--online {
+  color: var(--green);
+}
+
+/* ===== Discovery / scanning panel (board 1.3) ============================== */
+
+.pp-scan {
+  display: grid;
+  grid-template-columns: auto minmax(0, var(--ac-field-width-lg)) minmax(0, 1fr);
+  align-items: center;
+  gap: var(--ac-settings-gap);
+  padding: var(--ac-settings-pad);
+  border: 1px solid var(--line);
+  border-radius: var(--ac-radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+/* --- radar ---------------------------------------------------------------- */
+.pp-scan__radar {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: var(--ac-avatar-lg);
+  height: var(--ac-avatar-lg);
+  border-radius: var(--ac-radius-pill);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.pp-scan__ring {
+  position: absolute;
+  inset: 0;
+  border: 1px solid var(--accent2);
+  border-radius: var(--ac-radius-pill);
+  opacity: 0;
+  animation: pp-ping 2.4s var(--ac-ease) infinite;
+}
+
+.pp-scan__ring--2 {
+  animation-delay: 1.2s;
+}
+
+.pp-scan__sweep {
+  position: absolute;
+  inset: calc(var(--ac-settings-pad) / 2);
+  border-radius: var(--ac-radius-pill);
+  background: conic-gradient(from 0deg, transparent 0turn, var(--ac-on-accent) 0.02turn, var(--accent2) 0.24turn, transparent 0.26turn);
+  opacity: 0.45;
+  animation: pp-spin 3.2s linear infinite;
+}
+
+.pp-scan__radar > svg {
+  position: relative;
+  z-index: 1;
+}
+
+/* --- copy ----------------------------------------------------------------- */
+.pp-scan__copy {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--ac-settings-pad) / 2);
+  min-width: 0;
+}
+
+.pp-scan__copy > strong {
+  font-size: var(--ac-font-title);
+  font-weight: 800;
+  letter-spacing: -0.2px;
+  color: var(--text);
+}
+
+.pp-scan__copy > span {
+  font-size: var(--ac-font-body);
+  color: var(--muted);
+}
+
+.pp-scan__dots {
+  display: inline-flex;
+  gap: calc(var(--ac-settings-gap) / 6);
+}
+
+.pp-scan__dots > i {
+  width: var(--ac-menu-divider);
+  height: var(--ac-font-xxs);
+  border-radius: var(--ac-radius-pill);
+  background: var(--accent2);
+  animation: pp-bounce 1s var(--ac-ease) infinite alternate;
+}
+
+.pp-scan__dots > i:nth-child(2) { animation-delay: 0.15s; }
+.pp-scan__dots > i:nth-child(3) { animation-delay: 0.3s; }
+.pp-scan__dots > i:nth-child(4) { animation-delay: 0.45s; }
+
+.pp-scan__note {
+  margin: calc(var(--ac-settings-pad) / 2) 0 0;
+  font-size: var(--ac-font-xs);
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+/* --- shimmering placeholder rows ------------------------------------------ */
+.pp-scan__rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ac-settings-block);
+  min-width: 0;
+}
+
+.pp-scan__row {
+  display: flex;
+  align-items: center;
+  gap: var(--ac-settings-gap);
+}
+
+.pp-scan__row .ac-skeleton--avatar {
+  width: var(--ac-avatar-40);
+  height: var(--ac-avatar-40);
+  flex: 0 0 auto;
+}
+
+.pp-scan__lines {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--ac-settings-pad) / 2);
+  width: 100%;
+}
+
+@keyframes pp-ping {
+  0% { transform: scale(0.6); opacity: 0.6; }
+  80% { transform: scale(1); opacity: 0; }
+  100% { transform: scale(1); opacity: 0; }
+}
+
+@keyframes pp-spin {
+  to { transform: rotate(1turn); }
+}
+
+@keyframes pp-bounce {
+  from { transform: translateY(0); opacity: 0.4; }
+  to { transform: translateY(calc(var(--ac-font-xxs) / -2)); opacity: 1; }
+}
+
+/* ===== Responsive + motion prefs =========================================== */
+
+@media (max-width: 900px) {
+  .pp-scan {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .pp-scan__rows {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pp-scan__ring,
+  .pp-scan__sweep,
+  .pp-scan__dots > i {
+    animation: none;
+  }
+
+  .pp-scan__sweep {
+    display: none;
+  }
+}

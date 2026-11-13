@@ -648,11 +648,22 @@ fn app_name() -> &'static str {
 }
 #[tauri::command]
 fn list_peers(app: AppHandle) -> Vec<PeerDto> {
-    app.state::<OverlayState>()
+    let mut peers = app
+        .state::<OverlayState>()
         .peers
         .lock()
         .map(|v| v.clone())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // Pin and mute live in the settings file, so the list is only correct once
+    // they are folded back onto the discovered peers.
+    if let Ok(settings) = app.state::<platform::SettingsState>().0.lock() {
+        for peer in &mut peers {
+            peer.muted = settings.muted_chats.iter().any(|id| id == &peer.id);
+            peer.pinned = settings.pinned_chats.iter().any(|id| id == &peer.id);
+        }
+        peers.sort_by(|a, b| b.pinned.cmp(&a.pinned));
+    }
+    peers
 }
 #[tauri::command]
 fn list_messages(app: AppHandle, chat_id: String) -> Result<Vec<MessageDto>, String> {
@@ -1949,7 +1960,8 @@ fn main() {
             platform::restore_backup,
             platform::export_data,
             platform::reveal_path,
-            platform::set_muted_chat
+            platform::set_muted_chat,
+            platform::set_pinned_chat
         ])
         .run(tauri::generate_context!())
         .expect("failed to run AlverChat");

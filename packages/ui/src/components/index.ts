@@ -38,6 +38,14 @@ export type { TabsProps, TabItem } from './Tabs';
 export { ListGroup, ListRow } from './ListRow';
 export type { ListGroupProps, ListRowProps } from './ListRow';
 
+/* ===== Settings-board controls (added for the Settings screen) ===== */
+export { ThemeCards } from './ThemeCards';
+export type { ThemeCardsProps, ThemeChoice } from './ThemeCards';
+export { WeekdayPicker } from './WeekdayPicker';
+export type { WeekdayPickerProps } from './WeekdayPicker';
+export { HotkeyRecorder } from './HotkeyRecorder';
+export type { HotkeyRecorderProps } from './HotkeyRecorder';
+
 /* ===== Overlays ===== */
 export { Dialog } from './Dialog';
 export type { DialogProps, DialogSize } from './Dialog';

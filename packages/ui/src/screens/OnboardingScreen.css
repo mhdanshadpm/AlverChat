@@ -1,0 +1,718 @@
+/* ==========================================================================
+   OnboardingScreen — the 720x520 first-run window (spec 7.1).
+   Colours, radii, fonts and control sizes come only from styles.css base
+   tokens and --ac-* component tokens. The three values below are the only
+   literals because the spec itself fixes the window size and no token
+   encodes it; they are declared once, here, and used through calc().
+   ========================================================================== */
+
+.ob {
+  --ob-window-w: 720px;
+  --ob-window-h: 520px;
+  --ob-rail-w: 218px;
+
+  display: grid;
+  place-items: center;
+  width: 100%;
+  padding: var(--ac-settings-gap) 0;
+}
+
+.ob-window {
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--ob-rail-w) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
+  width: min(100%, var(--ob-window-w));
+  height: var(--ob-window-h);
+  border: 1px solid var(--line);
+  border-radius: var(--ac-radius-xl);
+  background: var(--surface);
+  box-shadow: var(--ac-dialog-shadow);
+  overflow: hidden;
+}
+
+/* Kept off-canvas: the window is borderless in the shell, but the preview
+   host needs to say what it is showing. */
+.ob-window__label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* ===== Rail ============================================================== */
+
+.ob-rail {
+  grid-row: 1 / 3;
+  display: flex;
+  flex-direction: column;
+  gap: var(--ac-settings-gap);
+  padding: var(--ac-settings-pad);
+  border-inline-end: 1px solid var(--line);
+  background: var(--surface-2);
+}
+
+.ob-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(var(--ac-settings-pad) / 2);
+  font-family: Manrope, Inter, sans-serif;
+  font-size: var(--ac-font-label);
+  font-weight: 800;
+  letter-spacing: -0.3px;
+  color: var(--accent);
+}
+
+.ob-rail__os {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(var(--ac-settings-pad) / 3);
+  font-size: var(--ac-font-xs);
+  color: var(--muted);
+}
+
+.ob-steps {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--ac-settings-pad) / 2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ob-steps__btn {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: calc(var(--ac-settings-gap) / 2);
+  width: 100%;
+  padding: calc(var(--ac-settings-pad) / 2) calc(var(--ac-settings-pad) / 3);
+  border: 0;
+  border-radius: var(--ac-radius-md);
+  background: none;
+  color: var(--muted);
+  text-align: start;
+  transition: background var(--ac-motion) var(--ac-ease), color var(--ac-motion) var(--ac-ease);
+}
+
+.ob-steps__btn:hover:not(:disabled) {
+  background: var(--ac-hover);
+}
+
+.ob-steps__btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.ob-steps__dot {
+  display: grid;
+  place-items: center;
+  width: var(--ac-chip-height);
+  height: var(--ac-chip-height);
+  border: 1px solid var(--line);
+  border-radius: var(--ac-radius-pill);
+  background: var(--surface);
+  font-size: var(--ac-font-xs);
+  font-weight: 700;
+  color: var(--muted);
+  transition: all var(--ac-motion) var(--ac-ease);
+}
+
+.ob-steps__text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.ob-steps__text b {
+  font-size: var(--ac-font-sm);
+  font-weight: 700;
+  color: inherit;
+}
+
+.ob-steps__text small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--ac-font-xxs);
+}
+
+.ob-steps__btn.is-current {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--ac-soft-shadow);
+}
+
+.ob-steps__btn.is-current .ob-steps__text b {
+  color: var(--accent);
+}
+
+.ob-steps__btn.is-current .ob-steps__dot {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--ac-on-accent);
+}
+
+.ob-steps__btn.is-done {
+  color: var(--text);
+}
+
+.ob-steps__btn.is-done .ob-steps__dot {
+  border-color: var(--green);
+  background: var(--ac-success-soft);
+  color: var(--green);
+}
+
+.ob-steps__seen {
+  color: var(--ac-presence-offline);
+}
+
+.ob-rail__foot {
+  margin-top: auto;
+  font-size: var(--ac-font-xxs);
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+/* ===== Body ============================================================== */
+
+.ob-body {
+  grid-column: 2;
+  grid-row: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--ac-settings-gap) var(--ac-settings-pad) var(--ac-settings-gap) var(--ac-settings-gap);
+}
+
+.ob-step {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ac-settings-block);
+  height: 100%;
+}
+
+.ob-step--center {
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
+.ob-h {
+  margin: 0;
+  font-family: Manrope, Inter, sans-serif;
+  font-size: var(--ac-font-title);
+  font-weight: 800;
+  letter-spacing: -0.4px;
+  color: var(--text);
+}
+
+.ob-sub {
+  margin: calc(var(--ac-settings-pad) / -3) 0 0;
+  max-width: var(--ac-settings-width);
+  font-size: var(--ac-font-body);
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.ob-label {
+  font-size: var(--ac-font-xs);
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.ob-note {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--ac-settings-pad) / 2);
+  margin: auto 0 0;
+  padding: calc(var(--ac-settings-pad) / 2) var(--ac-settings-pad);
+  border-radius: var(--ac-radius-md);
+  background: var(--accent-soft);
+  font-size: var(--ac-font-xs);
+  line-height: 1.45;
+  color: var(--text);
+}
+
+.ob-card {
+  padding: var(--ac-settings-pad);
+  border: 1px solid var(--line);
+  border-radius: var(--ac-radius-lg);
+  background: var(--surface-2);
+}
+
+/* ===== Step 1: welcome --------------------------------------------------- */
+
+.ob-welcome__art {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: var(--ac-avatar-lg);
+  height: var(--ac-avatar-lg);
+  margin-bottom: var(--ac-settings-block);
+  border-radius: var(--ac-radius-xl);
+  background: linear-gradient(140deg, var(--ac-av-violet-a), var(--accent2));
+  color: var(--ac-on-accent);
+  box-shadow: var(--ac-accent-glow-lg);
+}
+
+.ob-welcome__spark {
+  position: absolute;
+  inset-block-start: calc(var(--ac-settings-pad) / -2);
+  inset-inline-end: calc(var(--ac-settings-pad) / -2);
+  color: var(--accent);
+}
+
+.ob-benefits {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: calc(var(--ac-settings-pad) / 2);
+  margin: var(--ac-settings-block) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ob-benefits li {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(var(--ac-settings-pad) / 3);
+  padding: 0 var(--ac-settings-gap);
+  height: var(--ac-chip-height);
+  border: 1px solid var(--line);
+  border-radius: var(--ac-radius-pill);
+  background: var(--surface);
+  font-size: var(--ac-font-xs);
+  font-weight: 600;
+  color: var(--muted);
+}
+
+/* ===== Step 2: profile --------------------------------------------------- */
+
+.ob-profile {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: calc(var(--ac-settings-gap) / 2);
+}
+
+.ob-profile__who {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.ob-profile__who b {
+  font-size: var(--ac-font-label);
+  font-weight: 700;
+  color: var(--text);
+}
+
+.ob-profile__who small {
+  font-size: var(--ac-font-xs);
+  color: var(--muted);
+}
+
+.ob-palette {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  gap: calc(var(--ac-settings-gap) / 2);
+}
+
+.ob-swatch {
+  position: relative;
+  display: grid;
+  place-items: center;
+  aspect-ratio: 1;
+  min-height: var(--ac-control-sm);
+  border: 2px solid transparent;
+  border-radius: var(--ac-radius-pill);
+  background: linear-gradient(140deg, var(--ob-swatch-a), var(--ob-swatch-b));
+  color: var(--ac-on-accent);
+  transition: transform var(--ac-motion) var(--ac-ease), border-color var(--ac-motion) var(--ac-ease);
+}
+
+.ob-swatch:hover {
+  transform: translateY(calc(var(--ac-menu-divider) * -1));
+}
+
+.ob-swatch[aria-checked='true'] {
+  border-color: var(--text);
+  box-shadow: var(--ac-ring-shadow);
+}
+
+.ob-sizes {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--ac-settings-pad) / 2);
+}
+
+.ob-sizes__row {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--ac-settings-gap);
+  padding: calc(var(--ac-settings-pad) / 2) var(--ac-settings-pad);
+  border: 1px dashed var(--line);
+  border-radius: var(--ac-radius-md);
+  background: var(--surface);
+}
+
+.ob-sizes__item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: calc(var(--ac-settings-pad) / 3);
+  font-size: var(--ac-font-xxs);
+  color: var(--muted);
+}
+
+/* Hidden, not removed: the button drives it so the board's chrome stays. */
+.ob-file {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* ===== Step 3: permissions ----------------------------------------------- */
+
+.ob-perms {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--ac-settings-gap) / 2);
+}
+
+.ob-perm {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: calc(var(--ac-settings-gap) / 2);
+  padding: calc(var(--ac-settings-pad) / 2) var(--ac-settings-pad);
+  border: 1px solid var(--line);
+  border-radius: var(--ac-radius-md);
+  background: var(--surface);
+}
+
+.ob-perm[data-state='denied'] {
+  border-color: var(--ac-danger-line);
+  background: var(--ac-danger-soft);
+}
+
+.ob-perm__icon {
+  display: grid;
+  place-items: center;
+  width: var(--ac-control-md);
+  height: var(--ac-control-md);
+  border-radius: var(--ac-radius-sm);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.ob-perm__icon--success {
+  background: var(--ac-success-soft);
+  color: var(--green);
+}
+
+.ob-perm__icon--danger {
+  background: var(--ac-danger-soft);
+  color: var(--ac-danger-text);
+}
+
+.ob-perm__icon--neutral {
+  background: var(--surface-3);
+  color: var(--muted);
+}
+
+.ob-perm__copy {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.ob-perm__copy b {
+  font-size: var(--ac-font-sm);
+  font-weight: 700;
+  color: var(--text);
+}
+
+.ob-perm__copy small {
+  font-size: var(--ac-font-xs);
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+.ob-perm__lines {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--ac-settings-pad) / 3);
+  width: 100%;
+}
+
+.ob-perm--busy {
+  grid-template-columns: auto minmax(0, 1fr);
+}
+
+.ob-perm--busy .ac-skeleton--circle {
+  width: var(--ac-control-md);
+  height: var(--ac-control-md);
+}
+
+.ob-refresh {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: calc(var(--ac-settings-pad) / 3);
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: var(--ac-font-xs);
+  font-weight: 700;
+  color: var(--accent);
+}
+
+/* ===== Step 4: discovery -------------------------------------------------- */
+
+.ob-scan {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: calc(var(--ac-settings-pad) / 2);
+  padding: var(--ac-settings-gap);
+  border: 1px dashed var(--line);
+  border-radius: var(--ac-radius-lg);
+  background: var(--surface-2);
+  text-align: center;
+}
+
+.ob-scan__radar {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: var(--ac-avatar-56);
+  height: var(--ac-avatar-56);
+  margin-bottom: calc(var(--ac-settings-pad) / 2);
+  border-radius: var(--ac-radius-pill);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.ob-scan__ring {
+  position: absolute;
+  inset: 0;
+  border: 1px solid var(--accent2);
+  border-radius: var(--ac-radius-pill);
+  opacity: 0;
+  animation: ob-ping 2.2s var(--ac-ease) infinite;
+}
+
+.ob-scan__ring--late {
+  animation-delay: 1.1s;
+}
+
+.ob-scan b {
+  font-size: var(--ac-font-h2);
+  font-weight: 700;
+  color: var(--text);
+}
+
+.ob-scan small {
+  font-size: var(--ac-font-body);
+  color: var(--muted);
+}
+
+.ob-scan__tip {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(var(--ac-settings-pad) / 3);
+  margin-top: calc(var(--ac-settings-pad) / 3);
+  font-size: var(--ac-font-xs);
+  color: var(--muted);
+}
+
+.ob-people {
+  max-height: var(--ob-window-h);
+  overflow-y: auto;
+}
+
+/* ===== Step 5: summary ---------------------------------------------------- */
+
+.ob-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) repeat(2, minmax(0, 1fr));
+  gap: calc(var(--ac-settings-gap) / 2);
+}
+
+.ob-summary__avatar {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: calc(var(--ac-settings-pad) / 3);
+  padding: var(--ac-settings-pad);
+  border: 1px solid var(--line);
+  border-radius: var(--ac-radius-lg);
+  background: var(--surface-2);
+  text-align: center;
+}
+
+.ob-summary__avatar b {
+  font-size: var(--ac-font-label);
+  font-weight: 800;
+  color: var(--text);
+}
+
+.ob-summary__avatar small {
+  font-size: var(--ac-font-xs);
+  color: var(--muted);
+}
+
+.ob-summary__stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: calc(var(--ac-settings-pad) / 4);
+  padding: var(--ac-settings-pad);
+  border: 1px solid var(--line);
+  border-radius: var(--ac-radius-lg);
+  background: var(--surface-2);
+}
+
+.ob-summary__stat b {
+  font-family: Manrope, Inter, sans-serif;
+  font-size: var(--ac-avatar-lg);
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: -1px;
+  color: var(--accent);
+}
+
+.ob-summary__stat small {
+  font-size: var(--ac-font-xs);
+  color: var(--muted);
+}
+
+.ob-checks {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--ac-settings-pad) / 2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ob-checks li {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--ac-settings-pad) / 2);
+  font-size: var(--ac-font-body);
+  color: var(--text);
+}
+
+.ob-checks svg {
+  color: var(--green);
+  flex: 0 0 auto;
+}
+
+/* ===== Footer ============================================================ */
+
+.ob-foot {
+  grid-column: 2;
+  grid-row: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ac-settings-gap);
+  padding: var(--ac-settings-pad) var(--ac-settings-gap);
+  border-block-start: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.ob-foot__progress {
+  font-size: var(--ac-font-xs);
+  font-weight: 600;
+  color: var(--muted);
+}
+
+/* ===== Firewall guide dialog ---------------------------------------------- */
+
+.ob-guide {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ac-settings-block);
+  margin: 0;
+  padding: 0;
+  padding-inline-start: var(--ac-settings-gap);
+  list-style: decimal;
+  font-size: var(--ac-font-body);
+  line-height: 1.55;
+  color: var(--text);
+}
+
+.ob-guide li::marker {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.ob-guide + .ob-note {
+  margin-top: var(--ac-settings-gap);
+}
+
+/* ===== Motion + narrow windows =========================================== */
+
+@keyframes ob-ping {
+  0% { transform: scale(0.55); opacity: 0.65; }
+  80% { transform: scale(1); opacity: 0; }
+  100% { transform: scale(1); opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ob-scan__ring {
+    animation: none;
+    opacity: 0.35;
+  }
+
+  .ob-swatch,
+  .ob-steps__btn,
+  .ob-steps__dot {
+    transition: none;
+  }
+}
+
+@media (max-width: 760px) {
+  .ob-window {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    height: auto;
+    min-height: var(--ob-window-h);
+  }
+
+  .ob-rail {
+    grid-row: 1;
+  }
+
+  .ob-steps {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+
+  .ob-steps__text small,
+  .ob-rail__foot {
+    display: none;
+  }
+
+  .ob-body {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .ob-foot {
+    grid-column: 1;
+    grid-row: 3;
+  }
+}

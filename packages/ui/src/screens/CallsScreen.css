@@ -1,0 +1,161 @@
+/* ==========================================================================
+   CallsScreen — the calls board. Colours, radii and type sizes come from the
+   base tokens in styles.css or the --ac-* component tokens; nothing here
+   hard-codes a palette value.
+   ========================================================================== */
+
+.ac-calls {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ac-settings-block);
+  width: 100%;
+  max-width: var(--ac-settings-width);
+  min-width: 0;
+  margin: 0 auto;
+}
+
+/* ===== Start-a-call card ================================================ */
+
+.ac-calls__start {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--ac-space-sm);
+  padding: var(--ac-settings-block) var(--ac-settings-pad);
+  text-align: center;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--ac-radius-lg);
+  box-shadow: var(--shadow);
+}
+
+.ac-calls__art {
+  display: grid;
+  place-items: center;
+  width: calc(var(--ac-avatar-lg) + var(--ac-space-sm));
+  height: calc(var(--ac-avatar-lg) + var(--ac-space-sm));
+  border-radius: var(--ac-radius-xl);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.ac-calls__start h3 {
+  margin: 0;
+  font: 700 var(--ac-font-title) Manrope, Inter, sans-serif;
+  color: var(--text);
+}
+
+.ac-calls__start p {
+  margin: 0;
+  max-width: var(--ac-field-width-lg);
+  font-size: var(--ac-font-sm);
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.ac-calls__start-actions {
+  display: flex;
+  gap: var(--ac-space-sm);
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+/* ===== Toolbar ========================================================== */
+
+.ac-calls__toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ac-settings-gap);
+  flex-wrap: wrap;
+}
+
+.ac-calls__history {
+  margin: 0;
+  font-size: var(--ac-font-label);
+  font-weight: 700;
+  letter-spacing: var(--ac-label-tracking);
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* ===== Rows ============================================================= */
+
+.ac-calls__list {
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--ac-radius-lg);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.ac-call-row {
+  display: flex;
+  align-items: center;
+  gap: var(--ac-space-sm);
+  padding: var(--ac-space-sm) var(--ac-settings-pad);
+  border-bottom: 1px solid var(--ac-divider);
+}
+
+.ac-call-row:last-child {
+  border-bottom: 0;
+}
+
+.ac-call-row__copy {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ac-space-2xs);
+  flex: 1;
+  min-width: 0;
+}
+
+.ac-call-row__copy strong {
+  font-size: var(--ac-font-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.ac-call-row__copy small {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ac-space-2xs);
+  font-size: var(--ac-font-xs);
+  color: var(--muted);
+}
+
+.ac-call-row--missed .ac-call-row__copy strong {
+  color: var(--danger-text);
+}
+
+.ac-call-row__time {
+  font-size: var(--ac-font-xs);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.ac-call-row__actions {
+  display: inline-flex;
+  gap: var(--ac-space-2xs);
+}
+
+.ac-calls__empty,
+.ac-calls__loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--ac-space-sm);
+  padding: var(--ac-settings-block);
+  font-size: var(--ac-font-sm);
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px dashed var(--line);
+  border-radius: var(--ac-radius-lg);
+}
+
+@media (max-width: 720px) {
+  .ac-call-row__time {
+    display: none;
+  }
+}

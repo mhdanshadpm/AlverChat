@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 870362fe4968eff765209001baadf33b97d2471461a1a782ffeb5878b582b949 # shrinks to a = Hlc { physical_ms: 0, logical: 0 }, b = Hlc { physical_ms: 0, logical: 0 }, c = Hlc { physical_ms: 0, logical: 1 }
+cc 9796220c2e7227b740c7529e47b99c3c7940fd146f2059aac489ba5f5508ea7c # shrinks to stem = "a", extension = "a", traversal = "a."
+cc 67650cdae59b5115cb98d3725d4209e3521e3b2749c521f27ce72fbff1ea6d8c # shrinks to body = " ", replays = 1

@@ -47,6 +47,8 @@ export function useAppBridge() {
   const [bridge, setBridge] = useState<PlatformBridge>(emptyBrowserBridge);
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [identity, setIdentity] = useState<{ peerId: string; fingerprint: string } | null>(null);
+  /** False until the bridge has answered, so the shell can avoid flashing the onboarding gate. */
+  const [ready, setReady] = useState(false);
   useEffect(() => {
     let mounted = true;
     void bridgeForRuntime().then(async next => {
@@ -54,8 +56,9 @@ export function useAppBridge() {
       setBridge(next);
       setSettings(await next.getSettings());
       setIdentity(await next.getMyIdentity());
+      if (mounted) setReady(true);
     });
     return () => { mounted = false; };
   }, []);
-  return { bridge, settings, setSettings, identity };
+  return { bridge, settings, setSettings, identity, ready };
 }
