@@ -3,6 +3,7 @@
 pub mod crypto;
 pub mod discovery;
 pub mod identity;
+pub mod protocol;
 pub mod storage;
 
 use serde::{Deserialize, Serialize};
