@@ -61,6 +61,13 @@ pub const MIGRATIONS: &[MIGRATION] = &[
                  CREATE INDEX IF NOT EXISTS call_events_by_chat ON call_events(chat_id, started_ms, id);
              ",
     },
+    MIGRATION {
+        version: 5,
+        // Rows written before v5 keep `reply_to` NULL, which reads as "not a reply".
+        sql: "
+                 ALTER TABLE messages ADD COLUMN reply_to TEXT;
+             ",
+    },
 ];
 
 /// One entry of [`MIGRATIONS`].
@@ -162,7 +169,9 @@ pub(crate) fn migrate(connection: &mut Connection, target_version: u32) -> Resul
                 migration.version
             ));
         }
-        let transaction = connection.transaction().map_err(|error| error.to_string())?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
         transaction
             .execute_batch(migration.sql)
             .map_err(|error| error.to_string())?;
@@ -266,6 +275,20 @@ impl Store {
         peer_id: &str,
         envelope: &Envelope<serde_json::Value>,
     ) -> Result<(), String> {
+        self.enqueue_quoted_message(message, peer_id, envelope, None)
+    }
+
+    /// As [`Store::enqueue_message`], also recording which message this one quotes.
+    ///
+    /// A quote must point at an existing message in the same chat; a dangling or foreign
+    /// `reply_to` is refused instead of being stored, so the UI never renders a ghost.
+    pub fn enqueue_quoted_message(
+        &mut self,
+        message: &Message,
+        peer_id: &str,
+        envelope: &Envelope<serde_json::Value>,
+        reply_to: Option<Uuid>,
+    ) -> Result<(), String> {
         if message.id != envelope.id
             || message.chat_id != peer_id
             || envelope.to != peer_id
@@ -275,6 +298,23 @@ impl Store {
         {
             return Err("outgoing message and transport envelope do not match".into());
         }
+        if let Some(quoted) = reply_to {
+            if quoted == message.id {
+                return Err("a message cannot quote itself".into());
+            }
+            let quoted_chat: Option<String> = self
+                .connection
+                .query_row(
+                    "SELECT chat_id FROM messages WHERE id = ?1",
+                    params![quoted.to_string()],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| error.to_string())?;
+            if quoted_chat.as_deref() != Some(message.chat_id.as_str()) {
+                return Err("a reply must quote a message from the same chat".into());
+            }
+        }
         let envelope_bytes = serde_json::to_vec(envelope).map_err(|error| error.to_string())?;
         let transaction = self.connection.transaction().map_err(|e| e.to_string())?;
         transaction
@@ -283,12 +323,22 @@ impl Store {
                 params![message.chat_id],
             )
             .map_err(|error| error.to_string())?;
-        let inserted = transaction
-            .execute(
-                "INSERT INTO messages(id, chat_id, sender, body, physical_ms, logical, tombstone) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0) ON CONFLICT(id) DO NOTHING",
-                params![message.id.to_string(), message.chat_id, message.sender, message.body, message.clock.physical_ms, message.clock.logical],
-            )
-            .map_err(|error| error.to_string())?;
+        // Only a real quote touches the v5 column, so an unwritten `reply_to` keeps this
+        // statement valid against the v1 message shape.
+        let inserted = match reply_to {
+            None => transaction
+                .execute(
+                    "INSERT INTO messages(id, chat_id, sender, body, physical_ms, logical, tombstone) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0) ON CONFLICT(id) DO NOTHING",
+                    params![message.id.to_string(), message.chat_id, message.sender, message.body, message.clock.physical_ms, message.clock.logical],
+                )
+                .map_err(|error| error.to_string())?,
+            Some(quoted) => transaction
+                .execute(
+                    "INSERT INTO messages(id, chat_id, sender, body, physical_ms, logical, tombstone, reply_to) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7) ON CONFLICT(id) DO NOTHING",
+                    params![message.id.to_string(), message.chat_id, message.sender, message.body, message.clock.physical_ms, message.clock.logical, quoted.to_string()],
+                )
+                .map_err(|error| error.to_string())?,
+        };
         if inserted == 1 {
             transaction
                 .execute(
@@ -304,6 +354,116 @@ impl Store {
             )
             .map_err(|error| error.to_string())?;
         transaction.commit().map_err(|error| error.to_string())
+    }
+
+    /// Records the message a stored message quotes; `None` clears the quote.
+    ///
+    /// Used for the receive path, where the quote arrives with the envelope and the row
+    /// is already written. Same-chat and no-self-quote rules match
+    /// [`Store::enqueue_quoted_message`]; the tombstone of a quoted message is not
+    /// checked here, because the delete keeps the id and the UI renders a placeholder.
+    pub fn set_reply_to(
+        &mut self,
+        message_id: Uuid,
+        reply_to: Option<Uuid>,
+    ) -> Result<bool, String> {
+        if reply_to == Some(message_id) {
+            return Err("a message cannot quote itself".into());
+        }
+        let chat_id: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT chat_id FROM messages WHERE id = ?1",
+                params![message_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        let Some(chat_id) = chat_id else {
+            return Ok(false);
+        };
+        if let Some(quoted) = reply_to {
+            let quoted_chat: Option<String> = self
+                .connection
+                .query_row(
+                    "SELECT chat_id FROM messages WHERE id = ?1",
+                    params![quoted.to_string()],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| error.to_string())?;
+            if quoted_chat.as_deref() != Some(chat_id.as_str()) {
+                return Err("a reply must quote a message from the same chat".into());
+            }
+        }
+        self.connection
+            .execute(
+                "UPDATE messages SET reply_to = ?2 WHERE id = ?1",
+                params![message_id.to_string(), reply_to.map(|id| id.to_string())],
+            )
+            .map(|_| true)
+            .map_err(|error| error.to_string())
+    }
+
+    /// The message id this message quotes, when it quotes one.
+    pub fn reply_to_for(&self, message_id: Uuid) -> Result<Option<Uuid>, String> {
+        let raw: Option<Option<String>> = self
+            .connection
+            .query_row(
+                "SELECT reply_to FROM messages WHERE id = ?1",
+                params![message_id.to_string()],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        raw.flatten()
+            .map(|value| {
+                Uuid::parse_str(&value)
+                    .map(Some)
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap_or(Ok(None))
+    }
+
+    /// Quotes of every message in a chat, as `message_id -> quoted_id` pairs.
+    ///
+    /// One query for the whole thread, so `list_messages` does not pay per row.
+    pub fn replies_for_chat(&self, chat_id: &str) -> Result<Vec<(Uuid, Uuid)>, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT id, reply_to FROM messages WHERE chat_id = ?1 AND reply_to IS NOT NULL",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(params![chat_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| error.to_string())?;
+        rows.map(|row| {
+            let (id, quoted) = row.map_err(|error| error.to_string())?;
+            Ok((
+                Uuid::parse_str(&id).map_err(|error| error.to_string())?,
+                Uuid::parse_str(&quoted).map_err(|error| error.to_string())?,
+            ))
+        })
+        .collect()
+    }
+
+    /// Every group roster this device has verified, ordered by id.
+    pub fn all_group_states(&self) -> Result<Vec<GroupState>, String> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT state FROM groups ORDER BY id")
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))
+            .map_err(|error| error.to_string())?;
+        rows.map(|row| {
+            row.map_err(|error| error.to_string())
+                .and_then(|bytes| serde_json::from_slice(&bytes).map_err(|error| error.to_string()))
+        })
+        .collect()
     }
 
     pub fn is_message_pending(&self, id: Uuid) -> Result<bool, String> {

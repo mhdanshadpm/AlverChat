@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use uuid::Uuid;
 
-pub use files::{TransferState, TransferPolicy};
+pub use files::{TransferPolicy, TransferState};
 pub use payloads::Dispatch as IncomingDispatch;
 pub use rules::{EditWindow, ReceiptKind, RuleViolation};
 
@@ -285,17 +285,16 @@ mod tests {
         // The window is configurable and an expired one refuses.
         ledger.set_edit_window(EditWindow::new(50));
         assert_eq!(
-            ledger
-                .edit(
-                    id,
-                    "p",
-                    "too late",
-                    Hlc {
-                        physical_ms: 9_000,
-                        logical: 0
-                    },
-                    9_000
-                ),
+            ledger.edit(
+                id,
+                "p",
+                "too late",
+                Hlc {
+                    physical_ms: 9_000,
+                    logical: 0
+                },
+                9_000
+            ),
             Err(RuleViolation::EditWindowExpired {
                 sent_ms: 1_000,
                 now_ms: 9_000,

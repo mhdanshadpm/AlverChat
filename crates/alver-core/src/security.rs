@@ -42,15 +42,9 @@ pub enum SecurityError {
     /// A single component was too long.
     ComponentTooLong,
     /// The payload exceeded the configured byte budget.
-    TooManyBytes {
-        limit: usize,
-        found: usize,
-    },
+    TooManyBytes { limit: usize, found: usize },
     /// The image dimensions were outside the configured budget.
-    ImageDimensions {
-        width: u32,
-        height: u32,
-    },
+    ImageDimensions { width: u32, height: u32 },
     /// The image header did not agree with the declared dimensions.
     DimensionMismatch {
         declared: (u32, u32),
@@ -129,7 +123,8 @@ pub fn validate_avatar_image(
             found: bytes.len(),
         });
     }
-    let (format, width, height) = read_image_header(bytes).ok_or(SecurityError::UnrecognizedImage)?;
+    let (format, width, height) =
+        read_image_header(bytes).ok_or(SecurityError::UnrecognizedImage)?;
     if !ACCEPTED_AVATAR_MEDIA_TYPES.contains(&format) {
         return Err(SecurityError::UnsupportedMediaType(format.to_owned()));
     }
@@ -434,7 +429,11 @@ impl TokenBucket {
         if self.limit.refill_per_s == 0 {
             return Some(u64::MAX);
         }
-        Some((cost - available).saturating_mul(1_000).div_ceil(self.limit.refill_per_s))
+        Some(
+            (cost - available)
+                .saturating_mul(1_000)
+                .div_ceil(self.limit.refill_per_s),
+        )
     }
 
     /// Available tokens at `now_ms`, without spending or mutating anything.
@@ -618,10 +617,7 @@ mod tests {
     #[test]
     fn avatar_headers_are_read_without_decoding() {
         assert_eq!(read_image_header(&png(64, 64)), Some(("image/png", 64, 64)));
-        assert_eq!(
-            read_image_header(&gif(32, 16)),
-            Some(("image/gif", 32, 16))
-        );
+        assert_eq!(read_image_header(&gif(32, 16)), Some(("image/gif", 32, 16)));
         assert_eq!(
             read_image_header(&webp_lossy(20, 40)),
             Some(("image/webp", 20, 40))
@@ -802,9 +798,7 @@ mod tests {
                 size: 1,
                 blake3_hash: [0; 32],
             };
-            let offer_ok = offer
-                .validate(crate::files::DEFAULT_MAX_FILE_BYTES)
-                .is_ok();
+            let offer_ok = offer.validate(crate::files::DEFAULT_MAX_FILE_BYTES).is_ok();
             assert_eq!(
                 offer_ok,
                 is_safe_single_component(candidate),
@@ -835,7 +829,14 @@ mod tests {
         assert_eq!(bucket.available(10_000), 0);
         assert!(bucket.allow(10_000, 0));
         assert_eq!(
-            TokenBucket::new(RateLimit { refill_per_s: 0, burst: 1 }, 0).retry_after_ms(0, 2),
+            TokenBucket::new(
+                RateLimit {
+                    refill_per_s: 0,
+                    burst: 1
+                },
+                0
+            )
+            .retry_after_ms(0, 2),
             Some(u64::MAX)
         );
     }

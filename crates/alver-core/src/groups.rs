@@ -113,6 +113,28 @@ impl GroupState {
         self.sign(actor)
     }
 
+    /// Renames the group under the admin's next epoch.
+    ///
+    /// The name is inside the signed tuple, so the roster epoch is what tells every peer
+    /// that this rename is not a replay of an older state.
+    pub fn rename(&mut self, actor: &Identity, name: String) -> Result<(), GroupError> {
+        if self.id == EVERYONE_GROUP_ID {
+            return Err(GroupError::CannotChangeEveryone);
+        }
+        if actor.peer_id() != self.admin {
+            return Err(GroupError::NotAdmin);
+        }
+        if !self.verify() {
+            return Err(GroupError::InvalidState);
+        }
+        if name.trim().is_empty() {
+            return Err(GroupError::InvalidState);
+        }
+        self.name = name;
+        self.epoch = self.epoch.saturating_add(1);
+        self.sign(actor)
+    }
+
     fn sign(&mut self, identity: &Identity) -> Result<(), GroupError> {
         if identity.peer_id() != self.admin {
             return Err(GroupError::InvalidIdentity);
@@ -337,7 +359,13 @@ mod tests {
         assert!(!from_member.contains(&member.peer_id()));
         // Duplicates, blanks and the sender are all dropped, order is sorted.
         let messy = fan_out(
-            ["zed".to_owned(), "abc".to_owned(), "zed".to_owned(), String::new(), "abc".to_owned()],
+            [
+                "zed".to_owned(),
+                "abc".to_owned(),
+                "zed".to_owned(),
+                String::new(),
+                "abc".to_owned(),
+            ],
             "zed",
         );
         assert_eq!(messy, vec!["abc".to_owned()]);
@@ -360,14 +388,11 @@ mod tests {
         let plan = group.delivery_plan(&admin.peer_id(), envelope_id);
         let expected = vec![member.peer_id(), "peer-d".to_owned()];
         let listed: Vec<_> = plan.iter().map(|target| target.recipient.clone()).collect();
-        assert_eq!(
-            listed,
-            {
-                let mut sorted = expected.clone();
-                sorted.sort();
-                sorted
-            }
-        );
+        assert_eq!(listed, {
+            let mut sorted = expected.clone();
+            sorted.sort();
+            sorted
+        });
         assert_eq!(plan.len(), 2);
         assert!(plan.iter().all(|target| target.chat_id == group.id));
         assert!(plan.iter().all(|target| target.epoch == group.epoch));

@@ -65,7 +65,7 @@ impl OutboxEntry {
 
 /// Deterministic total order for the whole queue: HLC first, then id.
 #[must_use]
-pub fn replay_order<'a>(entries: &'a [OutboxEntry]) -> Vec<&'a OutboxEntry> {
+pub fn replay_order(entries: &[OutboxEntry]) -> Vec<&OutboxEntry> {
     let mut ordered: Vec<&OutboxEntry> = entries.iter().collect();
     ordered.sort_by(|left, right| {
         compare_messages(
@@ -122,7 +122,10 @@ impl PeerReplay {
 pub fn replay_plan(entries: &[OutboxEntry]) -> Vec<PeerReplay> {
     let mut by_peer: BTreeMap<&str, Vec<OutboxEntry>> = BTreeMap::new();
     for entry in entries {
-        by_peer.entry(entry.peer_id.as_str()).or_default().push(entry.clone());
+        by_peer
+            .entry(entry.peer_id.as_str())
+            .or_default()
+            .push(entry.clone());
     }
     by_peer
         .into_iter()
@@ -244,7 +247,10 @@ impl ReplaySession {
 
 /// Applies the receiver-side idempotence rule to a received envelope.
 #[must_use]
-pub fn apply_envelope_is_new(applied: &mut rules::ApplyTracker, envelope: &Envelope<Value>) -> bool {
+pub fn apply_envelope_is_new(
+    applied: &mut rules::ApplyTracker,
+    envelope: &Envelope<Value>,
+) -> bool {
     let id = envelope
         .payload
         .get("message_id")
@@ -300,16 +306,43 @@ mod tests {
     }
 
     fn entry(peer_id: &str, kind_name: &str, tail: u8, at: Hlc, payload: Value) -> OutboxEntry {
-        OutboxEntry::new(peer_id, &envelope(kind_name, Uuid::from_bytes([tail; 16]), at, payload))
+        OutboxEntry::new(
+            peer_id,
+            &envelope(kind_name, Uuid::from_bytes([tail; 16]), at, payload),
+        )
     }
 
     #[test]
     fn replay_order_is_hlc_then_id_and_ignores_insertion_order() {
         let entries = vec![
-            entry("peer-a", kind::REACTION, 4, clock(1, 1), serde_json::json!({})),
-            entry("peer-a", kind::MESSAGE, 1, clock(0, 3), serde_json::json!({})),
-            entry("peer-a", kind::MESSAGE_EDIT, 3, clock(1, 0), serde_json::json!({})),
-            entry("peer-a", kind::MESSAGE_DELETE, 2, clock(0, 4), serde_json::json!({})),
+            entry(
+                "peer-a",
+                kind::REACTION,
+                4,
+                clock(1, 1),
+                serde_json::json!({}),
+            ),
+            entry(
+                "peer-a",
+                kind::MESSAGE,
+                1,
+                clock(0, 3),
+                serde_json::json!({}),
+            ),
+            entry(
+                "peer-a",
+                kind::MESSAGE_EDIT,
+                3,
+                clock(1, 0),
+                serde_json::json!({}),
+            ),
+            entry(
+                "peer-a",
+                kind::MESSAGE_DELETE,
+                2,
+                clock(0, 4),
+                serde_json::json!({}),
+            ),
         ];
         let ordered = replay_order(&entries);
         let ids: Vec<u8> = ordered
@@ -334,19 +367,38 @@ mod tests {
     #[test]
     fn plans_are_grouped_per_peer_in_peer_order() {
         let entries = vec![
-            entry("peer-b", kind::MESSAGE, 9, clock(5, 0), serde_json::json!({})),
-            entry("peer-a", kind::MESSAGE, 8, clock(7, 0), serde_json::json!({})),
-            entry("peer-a", kind::REACTION, 7, clock(2, 0), serde_json::json!({})),
+            entry(
+                "peer-b",
+                kind::MESSAGE,
+                9,
+                clock(5, 0),
+                serde_json::json!({}),
+            ),
+            entry(
+                "peer-a",
+                kind::MESSAGE,
+                8,
+                clock(7, 0),
+                serde_json::json!({}),
+            ),
+            entry(
+                "peer-a",
+                kind::REACTION,
+                7,
+                clock(2, 0),
+                serde_json::json!({}),
+            ),
         ];
         let plan = replay_plan(&entries);
         assert_eq!(plan.len(), 2);
         assert_eq!(plan[0].peer_id, "peer-a");
         assert_eq!(
-            plan[0].entries.iter().map(|e| e.envelope.id).collect::<Vec<_>>(),
-            vec![
-                entries[2].envelope.id,
-                entries[1].envelope.id,
-            ]
+            plan[0]
+                .entries
+                .iter()
+                .map(|e| e.envelope.id)
+                .collect::<Vec<_>>(),
+            vec![entries[2].envelope.id, entries[1].envelope.id,]
         );
         assert_eq!(plan[1].peer_id, "peer-b");
         assert_eq!(plan[1].len(), 1);
@@ -355,7 +407,13 @@ mod tests {
 
     #[test]
     fn delivery_is_at_least_once_until_acknowledged() {
-        let message = entry("peer-a", kind::MESSAGE, 1, clock(1, 0), serde_json::json!({}));
+        let message = entry(
+            "peer-a",
+            kind::MESSAGE,
+            1,
+            clock(1, 0),
+            serde_json::json!({}),
+        );
         let mut session = ReplaySession::new(std::slice::from_ref(&message));
         assert_eq!(session.pending_for("peer-a"), 1);
         let first = session.next_for("peer-a").expect("queued");
@@ -423,7 +481,12 @@ mod tests {
         // Everything produced while the peer was away.
         session.register_offline_peer(
             "peer-offline",
-            vec![delete.clone(), message.clone(), reaction.clone(), edit.clone()],
+            vec![
+                delete.clone(),
+                message.clone(),
+                reaction.clone(),
+                edit.clone(),
+            ],
         );
         let mut sequence = Vec::new();
         while let Some(next) = session.next_for("peer-offline") {
@@ -433,7 +496,12 @@ mod tests {
         }
         assert_eq!(
             sequence,
-            vec![kind::MESSAGE, kind::MESSAGE_EDIT, kind::REACTION, kind::MESSAGE_DELETE]
+            vec![
+                kind::MESSAGE,
+                kind::MESSAGE_EDIT,
+                kind::REACTION,
+                kind::MESSAGE_DELETE
+            ]
         );
         assert_eq!(session.pending_total(), 0);
         // Re-registering the same rows after a reconnect replays nothing already acked.
@@ -443,8 +511,20 @@ mod tests {
 
     #[test]
     fn failure_requeues_at_the_head_and_keeps_causal_order() {
-        let message = entry("peer-a", kind::MESSAGE, 1, clock(1, 0), serde_json::json!({}));
-        let edit = entry("peer-a", kind::MESSAGE_EDIT, 2, clock(2, 0), serde_json::json!({}));
+        let message = entry(
+            "peer-a",
+            kind::MESSAGE,
+            1,
+            clock(1, 0),
+            serde_json::json!({}),
+        );
+        let edit = entry(
+            "peer-a",
+            kind::MESSAGE_EDIT,
+            2,
+            clock(2, 0),
+            serde_json::json!({}),
+        );
         let mut session = ReplaySession::new(&[message.clone(), edit.clone()]);
         let first = session.next_for("peer-a").unwrap();
         session.mark_inflight(first.id);
@@ -472,8 +552,18 @@ mod tests {
 
     #[test]
     fn envelope_order_matches_the_plan() {
-        let first = envelope(kind::MESSAGE, Uuid::from_bytes([1; 16]), clock(1, 0), serde_json::json!({}));
-        let second = envelope(kind::MESSAGE, Uuid::from_bytes([2; 16]), clock(1, 1), serde_json::json!({}));
+        let first = envelope(
+            kind::MESSAGE,
+            Uuid::from_bytes([1; 16]),
+            clock(1, 0),
+            serde_json::json!({}),
+        );
+        let second = envelope(
+            kind::MESSAGE,
+            Uuid::from_bytes([2; 16]),
+            clock(1, 1),
+            serde_json::json!({}),
+        );
         assert_eq!(envelope_order(&first, &second), std::cmp::Ordering::Less);
         assert_eq!(envelope_order(&second, &first), std::cmp::Ordering::Greater);
         assert_eq!(envelope_order(&first, &first), std::cmp::Ordering::Equal);

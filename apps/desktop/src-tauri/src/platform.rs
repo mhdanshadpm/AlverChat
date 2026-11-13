@@ -863,7 +863,11 @@ pub fn set_muted_chat(app: AppHandle, chat_id: String, muted: bool) -> Result<Ve
 }
 
 #[tauri::command]
-pub fn set_pinned_chat(app: AppHandle, chat_id: String, pinned: bool) -> Result<Vec<String>, String> {
+pub fn set_pinned_chat(
+    app: AppHandle,
+    chat_id: String,
+    pinned: bool,
+) -> Result<Vec<String>, String> {
     let state = app.state::<SettingsState>();
     let mut guard = state
         .0

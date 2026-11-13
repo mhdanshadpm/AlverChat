@@ -243,7 +243,7 @@ fn message_is_tombstoned(connection: &Connection, id: Uuid) -> Result<bool, Stri
             |row| row.get::<_, i64>(0),
         )
         .optional()
-        .map(|value| value.map_or(false, |flag| flag != 0))
+        .map(|value| value.is_some_and(|flag| flag != 0))
         .map_err(|error| error.to_string())
 }
 
@@ -258,12 +258,11 @@ fn announcement_exists(connection: &Connection, id: Uuid) -> Result<bool, String
         .map_err(|error| error.to_string())
 }
 
-fn announcement_ack_peers(
-    connection: &Connection,
-    id: Uuid,
-) -> Result<Vec<String>, String> {
+fn announcement_ack_peers(connection: &Connection, id: Uuid) -> Result<Vec<String>, String> {
     let mut statement = connection
-        .prepare("SELECT peer_id FROM announcement_acks WHERE announcement_id = ?1 ORDER BY peer_id")
+        .prepare(
+            "SELECT peer_id FROM announcement_acks WHERE announcement_id = ?1 ORDER BY peer_id",
+        )
         .map_err(|error| error.to_string())?;
     let rows = statement
         .query_map(params![id.to_string()], |row| row.get::<_, String>(0))
@@ -281,10 +280,7 @@ fn purge_messages_of_chat(connection: &Connection, chat_id: &str) -> Result<u64,
         )
         .map_err(|error| error.to_string())?;
     let removed = connection
-        .execute(
-            "DELETE FROM messages WHERE chat_id = ?1",
-            params![chat_id],
-        )
+        .execute("DELETE FROM messages WHERE chat_id = ?1", params![chat_id])
         .map(|count| count as u64)
         .map_err(|error| error.to_string())?;
     connection
@@ -353,10 +349,12 @@ impl Store {
     pub fn reactions_for_message(&self, message_id: Uuid) -> Result<Vec<Reaction>, String> {
         let mut statement = self
             .connection
-            .prepare("SELECT reactions.peer_id, reactions.emoji, reactions.created_ms \
+            .prepare(
+                "SELECT reactions.peer_id, reactions.emoji, reactions.created_ms \
                  FROM reactions JOIN messages ON messages.id = reactions.message_id \
                  WHERE reactions.message_id = ?1 AND messages.tombstone = 0 \
-                 ORDER BY reactions.created_ms, reactions.peer_id, reactions.emoji")
+                 ORDER BY reactions.created_ms, reactions.peer_id, reactions.emoji",
+            )
             .map_err(|error| error.to_string())?;
         let rows = statement
             .query_map(params![message_id.to_string()], |row| {
@@ -421,10 +419,12 @@ impl Store {
     pub fn receipts_for_message(&self, message_id: Uuid) -> Result<Vec<Receipt>, String> {
         let mut statement = self
             .connection
-            .prepare("SELECT receipts.peer_id, receipts.kind, receipts.occurred_ms \
+            .prepare(
+                "SELECT receipts.peer_id, receipts.kind, receipts.occurred_ms \
                  FROM receipts JOIN messages ON messages.id = receipts.message_id \
                  WHERE receipts.message_id = ?1 AND messages.tombstone = 0 \
-                 ORDER BY receipts.peer_id")
+                 ORDER BY receipts.peer_id",
+            )
             .map_err(|error| error.to_string())?;
         let rows = statement
             .query_map(params![message_id.to_string()], |row| {
@@ -439,6 +439,72 @@ impl Store {
             .map_err(|error| error.to_string())?;
         rows.map(|row| row.map_err(|error| error.to_string()))
             .collect()
+    }
+
+    /// Received messages of a chat that `reader_id` has not read yet.
+    ///
+    /// Tombstones and the reader's own messages never count, so "Mark unread" on a thread
+    /// of only my own messages stays a no-op.
+    pub fn unread_messages_for_chat(
+        &self,
+        chat_id: &str,
+        reader_id: &str,
+    ) -> Result<usize, String> {
+        self.connection
+            .query_row(
+                "SELECT COUNT(*) FROM messages \
+                 WHERE chat_id = ?1 AND tombstone = 0 AND sender <> ?2 \
+                 AND NOT EXISTS (SELECT 1 FROM receipts WHERE receipts.message_id = messages.id \
+                                 AND receipts.peer_id = ?2 AND receipts.kind = 'read')",
+                params![chat_id, reader_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|count| count.max(0) as usize)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Records a read receipt for every unread message of a chat; returns how many cleared.
+    ///
+    /// Written in one statement instead of through [`Store::record_receipt`] per row, and
+    /// it only ever raises the level, so a `read` can never be downgraded to `delivered`.
+    pub fn mark_chat_read(
+        &mut self,
+        chat_id: &str,
+        reader_id: &str,
+        occurred_ms: u64,
+    ) -> Result<usize, String> {
+        if chat_id.trim().is_empty() || reader_id.trim().is_empty() {
+            return Err("read state needs a chat and a reader".into());
+        }
+        let cleared = self.unread_messages_for_chat(chat_id, reader_id)?;
+        if cleared == 0 {
+            return Ok(0);
+        }
+        self.connection
+            .execute(
+                "INSERT INTO receipts(message_id, peer_id, kind, occurred_ms) \
+                 SELECT id, ?2, 'read', ?3 FROM messages \
+                 WHERE chat_id = ?1 AND tombstone = 0 AND sender <> ?2 \
+                 ON CONFLICT(message_id, peer_id) DO UPDATE SET kind = 'read', occurred_ms = excluded.occurred_ms",
+                params![chat_id, reader_id, to_ms(occurred_ms)],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(cleared)
+    }
+
+    /// Removes my read receipts in a chat so the unread count returns; returns how many.
+    pub fn mark_chat_unread(&mut self, chat_id: &str, reader_id: &str) -> Result<usize, String> {
+        if chat_id.trim().is_empty() || reader_id.trim().is_empty() {
+            return Err("read state needs a chat and a reader".into());
+        }
+        self.connection
+            .execute(
+                "DELETE FROM receipts WHERE peer_id = ?2 AND kind = 'read' \
+                 AND message_id IN (SELECT id FROM messages WHERE chat_id = ?1 AND sender <> ?2)",
+                params![chat_id, reader_id],
+            )
+            .map_err(|error| error.to_string())?;
+        self.unread_messages_for_chat(chat_id, reader_id)
     }
 
     /// Pins a message inside its chat; false when the message is missing or tombstoned.
@@ -658,7 +724,8 @@ impl Store {
                 .map_err(|error| error.to_string())?;
         }
         transaction.commit().map_err(|error| error.to_string())?;
-        rules::check_announcement_ack(&acked, peer_id).map_err(|violation| format!("{violation:?}"))?;
+        rules::check_announcement_ack(&acked, peer_id)
+            .map_err(|violation| format!("{violation:?}"))?;
         Ok(true)
     }
 
@@ -881,7 +948,9 @@ impl Store {
             .prepare("SELECT key, value FROM settings ORDER BY key")
             .map_err(|error| error.to_string())?;
         let rows = statement
-            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
             .map_err(|error| error.to_string())?;
         rows.map(|row| row.map_err(|error| error.to_string()))
             .collect()
@@ -905,13 +974,15 @@ impl Store {
 
     /// The configured maximum accepted file size in bytes.
     pub fn max_file_bytes(&self) -> Result<u64, String> {
-        Ok(self
-            .get_setting_or::<u64>(setting::MAX_FILE_BYTES, crate::files::DEFAULT_MAX_FILE_BYTES)?)
+        self.get_setting_or::<u64>(
+            setting::MAX_FILE_BYTES,
+            crate::files::DEFAULT_MAX_FILE_BYTES,
+        )
     }
 
     /// The configured auto-download limit in bytes; 0 means always ask first.
     pub fn auto_download_limit_bytes(&self) -> Result<u64, String> {
-        Ok(self.get_setting_or::<u64>(setting::AUTO_DOWNLOAD_LIMIT_BYTES, 0)?)
+        self.get_setting_or::<u64>(setting::AUTO_DOWNLOAD_LIMIT_BYTES, 0)
     }
 
     /// The size policy a [`crate::files::Transfer`] must be built with, straight from
@@ -925,7 +996,7 @@ impl Store {
 
     /// Whether announcements require admin authority in this install.
     pub fn announcements_are_admins_only(&self) -> Result<bool, String> {
-        Ok(self.get_setting_or::<bool>(setting::ANNOUNCEMENTS_ADMINS_ONLY, false)?)
+        self.get_setting_or::<bool>(setting::ANNOUNCEMENTS_ADMINS_ONLY, false)
     }
 
     /// Avatar budget taken from settings, falling back to the compiled defaults.
@@ -944,7 +1015,6 @@ impl Store {
     }
 
     /// Applies the configured retention window and reports the purge cutoff.
-    #[must_use]
     pub fn retention_cutoff_ms(&self, now_ms: u64) -> Result<u64, String> {
         let days = self.get_setting_or::<u64>(setting::RETENTION_DAYS, 0)?;
         let window = days.saturating_mul(24 * 60 * 60 * 1_000);
@@ -1015,6 +1085,43 @@ impl Store {
             .map_err(|error| error.to_string())
     }
 
+    /// Forgets one peer's cached avatar; false when nothing was stored.
+    pub fn forget_avatar(&mut self, peer_id: &str) -> Result<bool, String> {
+        self.connection
+            .execute(
+                "DELETE FROM avatar_cache WHERE peer_id = ?1",
+                params![peer_id],
+            )
+            .map(|count| count == 1)
+            .map_err(|error| error.to_string())
+    }
+
+    /// The oldest received message `reader_id` has not read, if any.
+    pub fn first_unread_message_for_chat(
+        &self,
+        chat_id: &str,
+        reader_id: &str,
+    ) -> Result<Option<Uuid>, String> {
+        self.connection
+            .query_row(
+                "SELECT id FROM messages \
+                 WHERE chat_id = ?1 AND tombstone = 0 AND sender <> ?2 \
+                 AND NOT EXISTS (SELECT 1 FROM receipts WHERE receipts.message_id = messages.id \
+                                 AND receipts.peer_id = ?2 AND receipts.kind = 'read') \
+                 ORDER BY physical_ms, logical, id LIMIT 1",
+                params![chat_id, reader_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?
+            .map(|raw| {
+                Uuid::parse_str(&raw)
+                    .map(Some)
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap_or(Ok(None))
+    }
+
     /// Drops cached avatars older than `older_than_ms`; returns how many went.
     pub fn prune_avatars(&mut self, older_than_ms: u64) -> Result<usize, String> {
         self.connection
@@ -1022,7 +1129,6 @@ impl Store {
                 "DELETE FROM avatar_cache WHERE updated_ms < ?1",
                 params![to_ms(older_than_ms)],
             )
-            .map(|count| count)
             .map_err(|error| error.to_string())
     }
 
@@ -1155,8 +1261,8 @@ impl Store {
                 let peer_id: String = row.get(0)?;
                 let bytes: Vec<u8> = row.get(1)?;
                 let attempt: i64 = row.get(2)?;
-                let envelope: Envelope<serde_json::Value> =
-                    serde_json::from_slice(&bytes).map_err(|error| {
+                let envelope: Envelope<serde_json::Value> = serde_json::from_slice(&bytes)
+                    .map_err(|error| {
                         rusqlite::Error::FromSqlConversionFailure(
                             1,
                             rusqlite::types::Type::Blob,
@@ -1219,10 +1325,7 @@ impl Store {
             .map_err(|error| error.to_string())?;
         let rows = statement
             .query_map(params![message_id.to_string()], |row| {
-                Ok((
-                    row.get::<_, i64>(0)? as u64,
-                    row.get::<_, String>(1)?,
-                ))
+                Ok((row.get::<_, i64>(0)? as u64, row.get::<_, String>(1)?))
             })
             .map_err(|error| error.to_string())?;
         rows.collect::<Result<Vec<_>, _>>()
@@ -1243,10 +1346,7 @@ impl Store {
             .map_err(|error| error.to_string())
     }
 
-    fn read_message(
-        connection: &Connection,
-        id: Uuid,
-    ) -> Result<Option<Message>, String> {
+    fn read_message(connection: &Connection, id: Uuid) -> Result<Option<Message>, String> {
         connection
             .query_row(
                 &format!("SELECT {MESSAGE_COLUMNS} FROM messages WHERE id = ?1"),
@@ -1337,11 +1437,11 @@ mod tests {
             .add_reaction(Uuid::now_v7(), "peer-b", "late", 1)
             .unwrap());
         assert!(store.tombstone_message(message.id, "peer-a").unwrap());
-        assert!(!store.add_reaction(message.id, "peer-b", "late", 20).unwrap());
+        assert!(!store
+            .add_reaction(message.id, "peer-b", "late", 20)
+            .unwrap());
         assert!(store.reactions_for_message(message.id).unwrap().is_empty());
-        assert!(store
-            .add_reaction(message.id, " ", "emoji", 20)
-            .is_err());
+        assert!(store.add_reaction(message.id, " ", "emoji", 20).is_err());
     }
 
     #[test]
@@ -1611,7 +1711,9 @@ mod tests {
         let mut store = store();
         let call_id = Uuid::now_v7();
         let chat = "chat-1";
-        store.save_message(&message(chat, "peer-a", "before the call", 1)).unwrap();
+        store
+            .save_message(&message(chat, "peer-a", "before the call", 1))
+            .unwrap();
         let events = [
             CallEvent {
                 id: Uuid::now_v7(),
@@ -1667,7 +1769,10 @@ mod tests {
             .unwrap();
         assert_eq!(store.edit_window().unwrap(), EditWindow::new(60_000));
         assert_eq!(
-            store.get_setting_raw(setting::EDIT_WINDOW_MS).unwrap().as_deref(),
+            store
+                .get_setting_raw(setting::EDIT_WINDOW_MS)
+                .unwrap()
+                .as_deref(),
             Some("60000"),
             "values are stored as JSON text"
         );
@@ -1683,8 +1788,16 @@ mod tests {
             .unwrap();
         assert_eq!(store.auto_download_limit_bytes().unwrap(), 1_024);
         assert_eq!(store.max_file_bytes().unwrap(), 4_096);
-        assert_eq!(store.get_setting::<u64>(setting::RATE_LIMIT_BURST).unwrap(), None);
-        assert_eq!(store.get_setting_or::<u64>(setting::RATE_LIMIT_BURST, 42).unwrap(), 42);
+        assert_eq!(
+            store.get_setting::<u64>(setting::RATE_LIMIT_BURST).unwrap(),
+            None
+        );
+        assert_eq!(
+            store
+                .get_setting_or::<u64>(setting::RATE_LIMIT_BURST, 42)
+                .unwrap(),
+            42
+        );
         // Malformed JSON falls back instead of failing the caller.
         store
             .connection
@@ -1694,12 +1807,17 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            store.get_setting_or::<u64>(setting::RETENTION_DAYS, 7).unwrap(),
+            store
+                .get_setting_or::<u64>(setting::RETENTION_DAYS, 7)
+                .unwrap(),
             7
         );
         assert_eq!(store.retention_cutoff_ms(1_000), Ok(1_000));
         assert!(store.delete_setting(setting::MAX_FILE_BYTES).unwrap());
-        assert_eq!(store.max_file_bytes().unwrap(), crate::files::DEFAULT_MAX_FILE_BYTES);
+        assert_eq!(
+            store.max_file_bytes().unwrap(),
+            crate::files::DEFAULT_MAX_FILE_BYTES
+        );
         let keys: Vec<String> = store.all_settings().unwrap().into_keys().collect();
         assert!(keys.contains(&setting::EDIT_WINDOW_MS.to_owned()));
         assert!(store.set_setting("", &1_u64, 0).is_err());
@@ -1750,7 +1868,9 @@ mod tests {
             .unwrap_err()
             .contains("EditWindowExpired"));
         // A window of zero closes as soon as a millisecond has passed.
-        store.set_setting(setting::EDIT_WINDOW_MS, &0_u64, 1).unwrap();
+        store
+            .set_setting(setting::EDIT_WINDOW_MS, &0_u64, 1)
+            .unwrap();
         assert!(store
             .edit_message_in_window(past.id, "peer-a", "closed", late_clock, 1_001)
             .unwrap_err()
@@ -1905,7 +2025,11 @@ mod tests {
         assert_eq!(rows.len(), 3);
         let plan = crate::outbox::replay_plan(&rows);
         assert_eq!(
-            plan[0].entries.iter().map(|e| e.attempt).collect::<Vec<_>>(),
+            plan[0]
+                .entries
+                .iter()
+                .map(|e| e.attempt)
+                .collect::<Vec<_>>(),
             vec![0, 0]
         );
         assert_eq!(store.bump_outbox_attempt(rows[0].id).unwrap(), 1);
@@ -1913,5 +2037,70 @@ mod tests {
         assert!(store.acknowledge_outbox(rows[0].id).unwrap());
         assert_eq!(store.outbox_rows().unwrap().len(), 2);
         assert_eq!(store.bump_outbox_attempt(Uuid::now_v7()).unwrap(), 0);
+    }
+
+    #[test]
+    fn read_receipts_drive_the_unread_count_of_a_chat() {
+        let mut store = store();
+        let reader = "peer-me";
+        let mine = message("chat-read", reader, "i spoke", 10);
+        let first = message("chat-read", "peer-a", "hello", 11);
+        let second = message("chat-read", "peer-b", "hello again", 12);
+        let gone = message("chat-read", "peer-a", "unsent", 13);
+        for item in [&mine, &first, &second, &gone] {
+            store.save_message(item).unwrap();
+        }
+        store.tombstone_message(gone.id, "peer-a").unwrap();
+        // My own words and tombstones never count as unread.
+        assert_eq!(
+            store.unread_messages_for_chat("chat-read", reader).unwrap(),
+            2
+        );
+        assert_eq!(
+            store
+                .first_unread_message_for_chat("chat-read", reader)
+                .unwrap(),
+            Some(first.id)
+        );
+        assert_eq!(store.mark_chat_read("chat-read", reader, 20).unwrap(), 2);
+        assert_eq!(
+            store
+                .first_unread_message_for_chat("chat-read", reader)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            store.unread_messages_for_chat("chat-read", reader).unwrap(),
+            0
+        );
+        assert!(
+            store.receipts_for_message(mine.id).unwrap().is_empty(),
+            "marking a chat read does not invent receipts for my own messages"
+        );
+        assert_eq!(
+            store
+                .receipts_for_message(first.id)
+                .unwrap()
+                .iter()
+                .filter(|receipt| receipt.kind == ReceiptKind::Read)
+                .count(),
+            1
+        );
+        // Marking again is a no-op, not a second row.
+        assert_eq!(store.mark_chat_read("chat-read", reader, 21).unwrap(), 0);
+        // "Mark unread" takes the receipts back and the count returns.
+        assert_eq!(store.mark_chat_unread("chat-read", reader).unwrap(), 2);
+        assert_eq!(
+            store.unread_messages_for_chat("chat-read", reader).unwrap(),
+            2
+        );
+        assert!(store
+            .receipts_for_message(first.id)
+            .unwrap()
+            .iter()
+            .all(|receipt| receipt.kind != ReceiptKind::Read));
+        store.mark_chat_read("not-a-chat", reader, 22).unwrap();
+        assert!(store.mark_chat_read("", reader, 22).is_err());
+        assert!(store.mark_chat_unread("chat-read", "").is_err());
     }
 }

@@ -29,10 +29,7 @@ pub enum RuleViolation {
         window_ms: u64,
     },
     /// Group epochs must advance by exactly one.
-    EpochGap {
-        expected: u64,
-        found: u64,
-    },
+    EpochGap { expected: u64, found: u64 },
     /// The state was not signed by the group's recorded admin.
     SignerNotAdmin,
     /// A roster tried to change the group's admin.
@@ -452,7 +449,10 @@ pub fn check_announcement_authority(
 }
 
 /// One acknowledgement per peer per announcement.
-pub fn check_announcement_ack(already_acked: &[String], peer_id: &str) -> Result<(), RuleViolation> {
+pub fn check_announcement_ack(
+    already_acked: &[String],
+    peer_id: &str,
+) -> Result<(), RuleViolation> {
     if already_acked.iter().any(|acked| acked == peer_id) {
         Err(RuleViolation::AlreadyAcknowledged)
     } else {
@@ -526,7 +526,10 @@ mod tests {
     #[test]
     fn only_the_sender_may_edit_and_nobody_may_edit_a_tombstone() {
         assert_eq!(edit_authority(PEER_B, PEER_B), Ok(()));
-        assert_eq!(edit_authority(PEER_B, PEER_C), Err(RuleViolation::NotSender));
+        assert_eq!(
+            edit_authority(PEER_B, PEER_C),
+            Err(RuleViolation::NotSender)
+        );
         let window = EditWindow::new(1_000);
         assert_eq!(
             window.allows_edit(PEER_B, PEER_C, false, 10, 20),
@@ -574,10 +577,7 @@ mod tests {
     #[test]
     fn admins_may_delete_anything_in_their_group_but_others_may_not() {
         assert_eq!(tombstone_authority(PEER_B, PEER_B, None), Ok(()));
-        assert_eq!(
-            tombstone_authority(PEER_B, ADMIN, Some(ADMIN)),
-            Ok(())
-        );
+        assert_eq!(tombstone_authority(PEER_B, ADMIN, Some(ADMIN)), Ok(()));
         assert_eq!(
             tombstone_authority(PEER_B, PEER_C, Some(ADMIN)),
             Err(RuleViolation::NotSender)
@@ -693,7 +693,10 @@ mod tests {
             admin: ADMIN,
             members: &grown,
         };
-        assert_eq!(check_group_state(Some(&previous), ADMIN, &successor), Ok(()));
+        assert_eq!(
+            check_group_state(Some(&previous), ADMIN, &successor),
+            Ok(())
+        );
         let skipped = RosterFacts {
             epoch: 7,
             admin: ADMIN,
@@ -760,47 +763,124 @@ mod tests {
     fn roster_changes_respect_admin_and_member_limits() {
         let members = roster(&[ADMIN, PEER_B, PEER_C]);
         assert_eq!(
-            check_roster_change(&request(ADMIN, "peer-d", RosterAction::Add, ADMIN, false, &members)),
+            check_roster_change(&request(
+                ADMIN,
+                "peer-d",
+                RosterAction::Add,
+                ADMIN,
+                false,
+                &members
+            )),
             Ok(())
         );
         assert_eq!(
-            check_roster_change(&request(ADMIN, ADMIN, RosterAction::Add, ADMIN, false, &members)),
+            check_roster_change(&request(
+                ADMIN,
+                ADMIN,
+                RosterAction::Add,
+                ADMIN,
+                false,
+                &members
+            )),
             Err(RuleViolation::AlreadyMember)
         );
         assert_eq!(
-            check_roster_change(&request(ADMIN, PEER_B, RosterAction::Remove, ADMIN, false, &members)),
+            check_roster_change(&request(
+                ADMIN,
+                PEER_B,
+                RosterAction::Remove,
+                ADMIN,
+                false,
+                &members
+            )),
             Ok(())
         );
         assert_eq!(
-            check_roster_change(&request(ADMIN, PEER_B, RosterAction::Mute, ADMIN, false, &members)),
+            check_roster_change(&request(
+                ADMIN,
+                PEER_B,
+                RosterAction::Mute,
+                ADMIN,
+                false,
+                &members
+            )),
             Ok(())
         );
         assert_eq!(
-            check_roster_change(&request(ADMIN, "peer-z", RosterAction::Mute, ADMIN, false, &members)),
+            check_roster_change(&request(
+                ADMIN,
+                "peer-z",
+                RosterAction::Mute,
+                ADMIN,
+                false,
+                &members
+            )),
             Err(RuleViolation::NotMember)
         );
         assert_eq!(
-            check_roster_change(&request(ADMIN, ADMIN, RosterAction::Remove, ADMIN, false, &members)),
+            check_roster_change(&request(
+                ADMIN,
+                ADMIN,
+                RosterAction::Remove,
+                ADMIN,
+                false,
+                &members
+            )),
             Err(RuleViolation::AdminCannotLeave)
         );
         assert_eq!(
-            check_roster_change(&request(ADMIN, ADMIN, RosterAction::Leave, ADMIN, false, &members)),
+            check_roster_change(&request(
+                ADMIN,
+                ADMIN,
+                RosterAction::Leave,
+                ADMIN,
+                false,
+                &members
+            )),
             Err(RuleViolation::AdminCannotLeave)
         );
         assert_eq!(
-            check_roster_change(&request(PEER_B, PEER_B, RosterAction::Leave, ADMIN, false, &members)),
+            check_roster_change(&request(
+                PEER_B,
+                PEER_B,
+                RosterAction::Leave,
+                ADMIN,
+                false,
+                &members
+            )),
             Ok(())
         );
         assert_eq!(
-            check_roster_change(&request(PEER_B, PEER_C, RosterAction::Remove, ADMIN, false, &members)),
+            check_roster_change(&request(
+                PEER_B,
+                PEER_C,
+                RosterAction::Remove,
+                ADMIN,
+                false,
+                &members
+            )),
             Err(RuleViolation::MemberCannotRemoveAnother)
         );
         assert_eq!(
-            check_roster_change(&request(PEER_B, "peer-d", RosterAction::Add, ADMIN, false, &members)),
+            check_roster_change(&request(
+                PEER_B,
+                "peer-d",
+                RosterAction::Add,
+                ADMIN,
+                false,
+                &members
+            )),
             Err(RuleViolation::NotAdmin)
         );
         assert_eq!(
-            check_roster_change(&request(PEER_B, PEER_C, RosterAction::Mute, ADMIN, false, &members)),
+            check_roster_change(&request(
+                PEER_B,
+                PEER_C,
+                RosterAction::Mute,
+                ADMIN,
+                false,
+                &members
+            )),
             Err(RuleViolation::NotAdmin)
         );
     }
@@ -814,29 +894,71 @@ mod tests {
         assert!(!is_everyone_member("peer-z", &peers));
         // Admins can add, remove and mute; every peer is already a member.
         assert_eq!(
-            check_roster_change(&request(ADMIN, PEER_B, RosterAction::Mute, ADMIN, true, &members)),
+            check_roster_change(&request(
+                ADMIN,
+                PEER_B,
+                RosterAction::Mute,
+                ADMIN,
+                true,
+                &members
+            )),
             Ok(())
         );
         assert_eq!(
-            check_roster_change(&request(ADMIN, PEER_B, RosterAction::Remove, ADMIN, true, &members)),
+            check_roster_change(&request(
+                ADMIN,
+                PEER_B,
+                RosterAction::Remove,
+                ADMIN,
+                true,
+                &members
+            )),
             Ok(())
         );
         assert_eq!(
-            check_roster_change(&request(ADMIN, "peer-z", RosterAction::Add, ADMIN, true, &members)),
+            check_roster_change(&request(
+                ADMIN,
+                "peer-z",
+                RosterAction::Add,
+                ADMIN,
+                true,
+                &members
+            )),
             Ok(())
         );
         assert_eq!(
-            check_roster_change(&request(ADMIN, PEER_B, RosterAction::Add, ADMIN, true, &members)),
+            check_roster_change(&request(
+                ADMIN,
+                PEER_B,
+                RosterAction::Add,
+                ADMIN,
+                true,
+                &members
+            )),
             Err(RuleViolation::AlreadyMember),
             "every peer is already an Everyone member"
         );
         // No member may remove another, and the admin may not leave.
         assert_eq!(
-            check_roster_change(&request(PEER_B, ADMIN, RosterAction::Remove, ADMIN, true, &members)),
+            check_roster_change(&request(
+                PEER_B,
+                ADMIN,
+                RosterAction::Remove,
+                ADMIN,
+                true,
+                &members
+            )),
             Err(RuleViolation::MemberCannotRemoveAnother)
         );
         assert_eq!(
-            check_roster_change(&request(ADMIN, ADMIN, RosterAction::Leave, ADMIN, true, &members)),
+            check_roster_change(&request(
+                ADMIN,
+                ADMIN,
+                RosterAction::Leave,
+                ADMIN,
+                true,
+                &members
+            )),
             Err(RuleViolation::AdminCannotLeave)
         );
         // A signed roster state for Everyone is always refused.

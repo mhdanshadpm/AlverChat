@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod commands;
 mod drag;
 mod platform;
 mod websocket;
@@ -121,6 +122,8 @@ struct MessageDto {
     kind: String,
     file_name: Option<String>,
     timestamp_ms: u64,
+    /// Id of the message this one quotes, when it is a reply.
+    reply_to: Option<String>,
     delivery_status: String,
 }
 #[derive(Serialize, Clone)]
@@ -411,6 +414,18 @@ fn handle_peer_session(
             .lock()
             .map_err(|_| "message store lock poisoned")?;
         let is_new = store.save_message(&message)?;
+        if is_new {
+            // A peer may quote one of our messages; the pointer is kept only when it
+            // resolves to a real message in this same chat, which `set_reply_to` checks.
+            if let Some(quoted) = envelope
+                .payload
+                .get("reply_to")
+                .and_then(Value::as_str)
+                .and_then(|raw| Uuid::parse_str(raw).ok())
+            {
+                let _ = store.set_reply_to(message.id, Some(quoted));
+            }
+        }
         drop(store);
 
         if let Ok(mut peers) = app.state::<OverlayState>().peers.lock() {
@@ -661,149 +676,34 @@ fn list_peers(app: AppHandle) -> Vec<PeerDto> {
             peer.muted = settings.muted_chats.iter().any(|id| id == &peer.id);
             peer.pinned = settings.pinned_chats.iter().any(|id| id == &peer.id);
         }
-        peers.sort_by(|a, b| b.pinned.cmp(&a.pinned));
+        peers.sort_by_key(|peer| std::cmp::Reverse(peer.pinned));
     }
     peers
 }
 #[tauri::command]
 fn list_messages(app: AppHandle, chat_id: String) -> Result<Vec<MessageDto>, String> {
-    let state = app.state::<OverlayState>();
-    let store = state
-        .store
-        .lock()
-        .map_err(|_| "message store lock poisoned")?;
-    store.messages_for_chat(&chat_id).map(|messages| {
-        messages
-            .into_iter()
-            .map(|message| MessageDto {
-                id: message.id.to_string(),
-                sender: message.sender.clone(),
-                text: if message.tombstone {
-                    "This message was deleted".into()
-                } else {
-                    message.body
-                },
-                time: "".into(),
-                mine: message.sender == "local",
-                read: false,
-                kind: if message.tombstone {
-                    "deleted".into()
-                } else {
-                    "text".into()
-                },
-                file_name: None,
-                timestamp_ms: message.clock.physical_ms,
-                delivery_status: if message.sender == "local"
-                    && store.is_message_pending(message.id).unwrap_or(false)
-                {
-                    "pending".into()
-                } else {
-                    "delivered".into()
-                },
-            })
-            .collect()
-    })
+    commands::message_dtos(&app, &chat_id)
 }
 #[tauri::command]
-async fn send_message(app: AppHandle, chat_id: String, text: String) -> Result<MessageDto, String> {
-    tauri::async_runtime::spawn_blocking(move || send_message_blocking(app, chat_id, text))
-        .await
-        .map_err(|error| error.to_string())?
-}
-
-fn send_message_blocking(
+async fn send_message(
     app: AppHandle,
     chat_id: String,
     text: String,
+    reply_to_id: Option<String>,
 ) -> Result<MessageDto, String> {
-    let text = text.trim();
-    if chat_id.trim().is_empty() || text.is_empty() || text.len() > 16_384 {
-        return Err("Message must have a chat and contain 1–16384 bytes.".into());
-    }
-    let state = app.state::<OverlayState>();
-    let beacon = state
-        .endpoints
-        .lock()
-        .map_err(|_| "peer endpoint lock poisoned")?
-        .get(&chat_id)
-        .cloned()
-        .ok_or_else(|| "This peer is no longer available on the local network.".to_owned())?;
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
-    let message = Message {
-        id: Uuid::now_v7(),
-        chat_id: chat_id.clone(),
-        sender: "local".into(),
-        body: text.to_owned(),
-        clock: Hlc {
-            physical_ms: now_ms,
-            logical: 0,
-        },
-        tombstone: false,
-    };
-    let envelope = Envelope {
-        v: PROTOCOL_VERSION,
-        id: message.id,
-        kind: "message".into(),
-        from: state.identity.peer_id(),
-        to: chat_id.clone(),
-        hlc: message.clock,
-        payload: serde_json::json!({"text": text}),
-    };
-    state
-        .store
-        .lock()
-        .map_err(|_| "message store lock poisoned")?
-        .enqueue_message(&message, &chat_id, &envelope)?;
-
-    let pending = state
-        .store
-        .lock()
-        .map_err(|_| "message store lock poisoned")?
-        .pending_outbox(&chat_id)?;
-    let mut delivery_failed = false;
-    for queued in pending {
-        if deliver_envelope(&app, &beacon, &queued).is_err() {
-            delivery_failed = true;
-            break;
-        }
-    }
-    if delivery_failed {
-        start_outbox_retry(app.clone(), beacon);
-    }
-    let delivery_status = if state
-        .store
-        .lock()
-        .map_err(|_| "message store lock poisoned")?
-        .is_message_pending(message.id)?
-    {
-        "pending"
-    } else {
-        "delivered"
-    };
-    if let Ok(mut peers) = state.peers.lock() {
-        if let Some(peer) = peers.iter_mut().find(|peer| peer.id == chat_id) {
-            peer.preview = message.body.clone();
-        }
-    }
-    publish(&app);
-    Ok(MessageDto {
-        id: message.id.to_string(),
-        sender: "local".into(),
-        text: message.body,
-        time: String::new(),
-        mine: true,
-        read: false,
-        kind: "text".into(),
-        file_name: None,
-        timestamp_ms: message.clock.physical_ms,
-        delivery_status: delivery_status.into(),
+    tauri::async_runtime::spawn_blocking(move || {
+        commands::send_message(app, chat_id, text, reply_to_id)
     })
+    .await
+    .map_err(|error| error.to_string())?
 }
 #[tauri::command]
 fn mark_as_read(app: AppHandle, chat_id: String) {
+    // Read receipts are what make an unread badge durable across restarts, so
+    // clearing the in-memory counter alone would let it come back.
+    if let Ok(mut store) = app.state::<OverlayState>().store.lock() {
+        let _ = store.mark_chat_read(&chat_id, "local", commands::now_ms());
+    }
     if let Ok(mut peers) = app.state::<OverlayState>().peers.lock() {
         if let Some(peer) = peers.iter_mut().find(|peer| peer.id == chat_id) {
             peer.unread = None;
@@ -1961,7 +1861,36 @@ fn main() {
             platform::export_data,
             platform::reveal_path,
             platform::set_muted_chat,
-            platform::set_pinned_chat
+            platform::set_pinned_chat,
+            commands::pin_message,
+            commands::pinned_messages,
+            commands::star_message,
+            commands::starred_messages,
+            commands::reactions_for,
+            commands::react,
+            commands::forward_messages,
+            commands::search_messages,
+            commands::set_typing,
+            commands::mark_unread,
+            commands::clear_chat,
+            commands::delete_chat,
+            commands::delete_for_everyone,
+            commands::attachments_for,
+            commands::send_file,
+            commands::control_transfer,
+            commands::open_attachment,
+            commands::list_groups,
+            commands::create_group,
+            commands::update_group,
+            commands::add_group_members,
+            commands::remove_group_member,
+            commands::leave_group,
+            commands::list_announcements,
+            commands::send_announcement,
+            commands::acknowledge_announcement,
+            commands::list_calls,
+            commands::set_avatar,
+            commands::get_avatar
         ])
         .run(tauri::generate_context!())
         .expect("failed to run AlverChat");

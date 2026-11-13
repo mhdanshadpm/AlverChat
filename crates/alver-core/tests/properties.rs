@@ -284,53 +284,53 @@ proptest! {
     #[test]
     fn store_apply_is_idempotent_and_tombstones_win(body in "[a-z][a-z ]{0,23}", replays in 1_usize..5) {
         let mut store = alver_core::storage::Store::open(":memory:", &[3; 32])
-            .map_err(|error| proptest::test_runner::TestCaseError::fail(error))?;
+            .map_err(proptest::test_runner::TestCaseError::fail)?;
         let entry = message(&body, "peer-a", 10);
         let first = store
             .save_message(&entry)
-            .map_err(|error| proptest::test_runner::TestCaseError::fail(error))?;
+            .map_err(proptest::test_runner::TestCaseError::fail)?;
         prop_assert!(first);
         for _ in 1..replays {
             let again = store
                 .save_message(&entry)
-                .map_err(|error| proptest::test_runner::TestCaseError::fail(error))?;
+                .map_err(proptest::test_runner::TestCaseError::fail)?;
             prop_assert!(!again);
         }
         prop_assert_eq!(
             store
                 .messages_for_chat("chat-1")
-                .map_err(|error| proptest::test_runner::TestCaseError::fail(error))?
+                .map_err(proptest::test_runner::TestCaseError::fail)?
                 .len(),
             1
         );
         prop_assert!(store
             .search_messages(&body, 10)
-            .map_err(|error| proptest::test_runner::TestCaseError::fail(error))?
+            .map_err(proptest::test_runner::TestCaseError::fail)?
             .iter()
             .any(|(id, _)| *id == entry.id));
         prop_assert!(store
             .add_reaction(entry.id, "peer-b", "heart", 11)
-            .map_err(|error| proptest::test_runner::TestCaseError::fail(error))?);
+            .map_err(proptest::test_runner::TestCaseError::fail)?);
         prop_assert!(!store
             .add_reaction(entry.id, "peer-b", "heart", 12)
-            .map_err(|error| proptest::test_runner::TestCaseError::fail(error))?);
+            .map_err(proptest::test_runner::TestCaseError::fail)?);
         prop_assert!(store
             .tombstone_message(entry.id, "peer-a")
-            .map_err(|error| proptest::test_runner::TestCaseError::fail(error))?);
+            .map_err(proptest::test_runner::TestCaseError::fail)?);
         // Gone from search, invisible reactions, immune to late edits.
         prop_assert!(store
             .search_messages(&body, 10)
-            .map_err(|error| proptest::test_runner::TestCaseError::fail(error))?
+            .map_err(proptest::test_runner::TestCaseError::fail)?
             .is_empty());
         prop_assert!(store
             .reactions_for_message(entry.id)
-            .map_err(|error| proptest::test_runner::TestCaseError::fail(error))?
+            .map_err(proptest::test_runner::TestCaseError::fail)?
             .is_empty());
         prop_assert!(!store
             .add_reaction(entry.id, "peer-c", "boo", 13)
-            .map_err(|error| proptest::test_runner::TestCaseError::fail(error))?);
+            .map_err(proptest::test_runner::TestCaseError::fail)?);
         prop_assert!(!store
             .record_receipt(entry.id, "peer-b", ReceiptKind::Read, 14)
-            .map_err(|error| proptest::test_runner::TestCaseError::fail(error))?);
+            .map_err(proptest::test_runner::TestCaseError::fail)?);
     }
 }

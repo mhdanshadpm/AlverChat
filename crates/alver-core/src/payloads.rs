@@ -709,11 +709,7 @@ pub fn classify(envelope: &Envelope<Value>) -> Payload {
         kind::AVATAR_DATA => parse(value, Payload::AvatarData, IgnoreReason::AvatarData),
         kind::MESSAGE => parse(value, Payload::Message, IgnoreReason::Message),
         kind::MESSAGE_EDIT => parse(value, Payload::MessageEdit, IgnoreReason::MessageEdit),
-        kind::MESSAGE_DELETE => parse(
-            value,
-            Payload::MessageDelete,
-            IgnoreReason::MessageDelete,
-        ),
+        kind::MESSAGE_DELETE => parse(value, Payload::MessageDelete, IgnoreReason::MessageDelete),
         kind::REACTION => parse(value, Payload::Reaction, IgnoreReason::Reaction),
         kind::RECEIPT => parse(value, Payload::Receipt, IgnoreReason::Receipt),
         kind::TYPING => parse(value, Payload::Typing, IgnoreReason::Typing),
@@ -754,15 +750,13 @@ pub fn classify(envelope: &Envelope<Value>) -> Payload {
         _ => Err(IgnoreReason::UnknownType),
     };
     parsed
-        .map(|payload| {
-            match payload.size_violation() {
-                Some(reason) => Payload::Ignored(Ignored {
-                    kind: envelope.kind.clone(),
-                    reason,
-                    detail: None,
-                }),
-                None => payload,
-            }
+        .map(|payload| match payload.size_violation() {
+            Some(reason) => Payload::Ignored(Ignored {
+                kind: envelope.kind.clone(),
+                reason,
+                detail: None,
+            }),
+            None => payload,
         })
         .unwrap_or_else(|reason| {
             Payload::Ignored(Ignored {
@@ -1286,7 +1280,10 @@ mod tests {
         for bad in &unusable {
             assert!(classify(&envelope(kind::REACTION, bad.clone())).is_ignored());
             assert!(classify(&envelope("brand_new_type", bad.clone())).is_ignored());
-            assert_eq!(dispatch(&envelope(kind::REACTION, bad.clone())), Dispatch::Ignore);
+            assert_eq!(
+                dispatch(&envelope(kind::REACTION, bad.clone())),
+                Dispatch::Ignore
+            );
         }
     }
 
@@ -1330,22 +1327,22 @@ mod tests {
     #[test]
     fn known_type_table_is_shared_with_the_framing_layer() {
         for kind_name in ALL_TYPES {
-            let bytes = serde_json::to_vec(&envelope(
-                kind_name,
-                Value::Object(serde_json::Map::new()),
-            ))
-            .unwrap();
+            let bytes =
+                serde_json::to_vec(&envelope(kind_name, Value::Object(serde_json::Map::new())))
+                    .unwrap();
             assert!(
                 decode_control_frame(&bytes).unwrap().is_some(),
                 "{kind_name} must be a framing-layer known type"
             );
         }
         assert_eq!(
-            decode_control_frame(&serde_json::to_vec(&envelope(
-                "not_a_type",
-                Value::Object(serde_json::Map::new())
-            ))
-            .unwrap())
+            decode_control_frame(
+                &serde_json::to_vec(&envelope(
+                    "not_a_type",
+                    Value::Object(serde_json::Map::new())
+                ))
+                .unwrap()
+            )
             .unwrap(),
             None
         );

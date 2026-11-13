@@ -8,8 +8,8 @@ use uuid::Uuid;
 
 use alver_core::groups::GroupState;
 use alver_core::identity::Identity;
-use alver_core::storage::{Store, LATEST_SCHEMA_VERSION, MIGRATIONS};
 use alver_core::rules::ReceiptKind;
+use alver_core::storage::{Store, LATEST_SCHEMA_VERSION, MIGRATIONS};
 use alver_core::store_ext::{self, setting};
 use alver_core::{Envelope, Hlc, Message, PROTOCOL_VERSION};
 
@@ -18,7 +18,8 @@ fn key() -> [u8; 32] {
 }
 
 fn database_path(label: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!("alverchat-migrate-{label}-{}.db", Uuid::now_v7()));
+    let path =
+        std::env::temp_dir().join(format!("alverchat-migrate-{label}-{}.db", Uuid::now_v7()));
     fs::canonicalize(std::env::temp_dir())
         .unwrap()
         .join(path.file_name().unwrap())
@@ -52,10 +53,22 @@ fn seed_v1_rows(store: &mut Store) -> Seed {
     let first = Uuid::now_v7();
     let second = Uuid::now_v7();
     store
-        .save_message(&message(first, "chat-1", "peer-a", "the first message", 100))
+        .save_message(&message(
+            first,
+            "chat-1",
+            "peer-a",
+            "the first message",
+            100,
+        ))
         .unwrap();
     store
-        .save_message(&message(second, "chat-1", "peer-b", "the second message", 200))
+        .save_message(&message(
+            second,
+            "chat-1",
+            "peer-b",
+            "the second message",
+            200,
+        ))
         .unwrap();
     // v1 revisions, peers, groups and outbox all exist from the start.
     store
@@ -70,7 +83,12 @@ fn seed_v1_rows(store: &mut Store) -> Seed {
         )
         .unwrap();
     store
-        .save_peer(&member.peer_id(), "Robin", &member.verifying_key().to_bytes(), 50)
+        .save_peer(
+            &member.peer_id(),
+            "Robin",
+            &member.verifying_key().to_bytes(),
+            50,
+        )
         .unwrap();
     let group = GroupState::create(
         &admin,
@@ -167,7 +185,10 @@ fn a_populated_v1_database_upgrades_with_every_row_intact() {
     assert_eq!(history[0].body, "the second message");
     assert_eq!(history[1].id, seed.first);
     assert_eq!(history[1].body, "the edited message");
-    assert_eq!(store.get_message(seed.second).unwrap().unwrap().sender, "peer-b");
+    assert_eq!(
+        store.get_message(seed.second).unwrap().unwrap().sender,
+        "peer-b"
+    );
     assert_eq!(store.revision_count(seed.first).unwrap(), 1);
     assert_eq!(store.known_peers().unwrap().len(), 1);
     let group = store.get_group_state(&seed.group_id).unwrap().unwrap();
@@ -176,7 +197,9 @@ fn a_populated_v1_database_upgrades_with_every_row_intact() {
     assert!(store.is_message_pending(seed.second).unwrap());
 
     // ...and the v2+ tables are now usable.
-    assert!(store.add_reaction(seed.first, "peer-c", "heart", 400).unwrap());
+    assert!(store
+        .add_reaction(seed.first, "peer-c", "heart", 400)
+        .unwrap());
     assert!(store
         .record_receipt(seed.first, "peer-c", ReceiptKind::Read, 410)
         .unwrap());
@@ -185,7 +208,10 @@ fn a_populated_v1_database_upgrades_with_every_row_intact() {
     store
         .set_setting(setting::EDIT_WINDOW_MS, &900_u64, 440)
         .unwrap();
-    assert_eq!(store.edit_window().unwrap(), alver_core::rules::EditWindow::new(900));
+    assert_eq!(
+        store.edit_window().unwrap(),
+        alver_core::rules::EditWindow::new(900)
+    );
     let announcement = store_ext::Announcement {
         id: Uuid::now_v7(),
         group_id: seed.group_id.clone(),
@@ -231,7 +257,7 @@ fn a_populated_v1_database_upgrades_with_every_row_intact() {
         .unwrap();
     assert_eq!(store.calls_for_chat("chat-1").unwrap().len(), 1);
 
-    // The v1 message table is untouched in shape: the desktop still reads it directly.
+    // The v1 columns all survive; v5 only appends the reply pointer.
     let columns = store.table_columns("messages").unwrap();
     assert_eq!(
         columns,
@@ -242,9 +268,54 @@ fn a_populated_v1_database_upgrades_with_every_row_intact() {
             "body",
             "physical_ms",
             "logical",
-            "tombstone"
+            "tombstone",
+            "reply_to"
         ]
     );
+    assert!(store.reply_to_for(seed.second).unwrap().is_none());
+    drop(store);
+    fs::remove_file(&path).ok();
+}
+
+#[test]
+fn a_v4_database_gains_the_reply_column_and_keeps_its_rows() {
+    let path = database_path("reply-column");
+    let (first, second) = (Uuid::now_v7(), Uuid::now_v7());
+    {
+        let mut store = Store::open_to_version(path.to_str().unwrap(), &key(), 4).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 4);
+        store
+            .save_message(&message(first, "chat-5", "peer-a", "quote me", 100))
+            .unwrap();
+        store
+            .save_message(&message(second, "chat-5", "peer-b", "quoted you", 200))
+            .unwrap();
+        // The column does not exist yet, so a quote cannot be recorded before v5.
+        store.set_reply_to(second, Some(first)).unwrap_err();
+    }
+    let mut store = Store::open(path.to_str().unwrap(), &key()).unwrap();
+    assert_eq!(store.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    assert_eq!(store.messages_for_chat("chat-5").unwrap().len(), 2);
+    assert_eq!(
+        store.messages_for_chat("chat-5").unwrap()[0].body,
+        "quote me"
+    );
+    assert!(store.set_reply_to(second, Some(first)).unwrap());
+    assert_eq!(store.reply_to_for(second).unwrap(), Some(first));
+    assert_eq!(
+        store.replies_for_chat("chat-5").unwrap(),
+        vec![(second, first)]
+    );
+    // Quoting across chats and quoting yourself are both refused.
+    store
+        .set_reply_to(second, Some(Uuid::now_v7()))
+        .unwrap_err();
+    store.set_reply_to(second, Some(second)).unwrap_err();
+    assert_eq!(store.reply_to_for(second).unwrap(), Some(first));
+    assert!(store.set_reply_to(second, None).unwrap());
+    assert!(store.reply_to_for(second).unwrap().is_none());
+    assert!(store.replies_for_chat("chat-5").unwrap().is_empty());
+    assert!(!store.set_reply_to(Uuid::now_v7(), Some(first)).unwrap());
     drop(store);
     fs::remove_file(&path).ok();
 }
@@ -280,10 +351,7 @@ fn the_runner_never_reapplies_or_downgrades() {
         "unexpected error: {error}"
     );
     let still_there = Store::open(path.to_str().unwrap(), &key()).unwrap();
-    assert_eq!(
-        still_there.schema_version().unwrap(),
-        LATEST_SCHEMA_VERSION
-    );
+    assert_eq!(still_there.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
     assert_eq!(still_there.messages_for_chat("chat-loop").unwrap().len(), 1);
     assert!(Store::open_to_version(path.to_str().unwrap(), &key(), 99).is_err());
     drop(still_there);

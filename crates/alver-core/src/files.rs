@@ -397,10 +397,7 @@ impl Transfer {
             return Ok(false);
         }
         let offset = chunk_offset(index).ok_or_else(|| "chunk offset overflow".to_owned())?;
-        let file = self
-            .file
-            .as_mut()
-            .ok_or("transfer has no open part file")?;
+        let file = self.file.as_mut().ok_or("transfer has no open part file")?;
         file.seek(SeekFrom::Start(offset))
             .map_err(|error| error.to_string())?;
         file.write_all(bytes).map_err(|error| error.to_string())?;
@@ -431,8 +428,7 @@ impl Transfer {
             return Err("file hash does not match the offer".into());
         }
         let destination = self.destination_root.join(final_name(&self.offer));
-        fs::rename(&self.part_path, &destination)
-            .map_err(|error| error.to_string())?;
+        fs::rename(&self.part_path, &destination).map_err(|error| error.to_string())?;
         let _ = fs::remove_file(&self.index_path);
         self.received.clear();
         self.state = TransferState::Completed;
@@ -486,14 +482,12 @@ impl Transfer {
     /// Highest chunk index with no gap below it, if any chunk is verified.
     #[must_use]
     pub fn last_verified_chunk(&self) -> Option<u64> {
-        let mut expected = 0_u64;
         let mut last = None;
-        for index in &self.received {
-            if *index != expected {
+        for (expected, index) in self.received.iter().enumerate() {
+            if *index != expected as u64 {
                 break;
             }
             last = Some(*index);
-            expected += 1;
         }
         last
     }
@@ -605,6 +599,9 @@ impl Transfer {
             .write(true)
             .read(true)
             .create(true)
+            // A resumed transfer rewrites single chunk offsets, so the file must not
+            // be truncated on open.
+            .truncate(false)
             .open(path)
             .map_err(|error| error.to_string())
     }
@@ -619,11 +616,8 @@ impl Transfer {
             return self.reset_index();
         }
         let mut restored = BTreeSet::new();
-        for record in bytes.chunks_exact(INDEX_RECORD_BYTES) {
-            let Ok(record) = <[u8; INDEX_RECORD_BYTES]>::try_from(record) else {
-                return self.reset_index();
-            };
-            let index = u64::from_le_bytes(record);
+        for record in bytes.as_chunks::<INDEX_RECORD_BYTES>().0 {
+            let index = u64::from_le_bytes(*record);
             if index >= total {
                 return self.reset_index();
             }
@@ -1013,7 +1007,11 @@ mod tests {
         assert!(transfer
             .write_chunk(1, vec![0_u8; MAX_FILE_CHUNK_BYTES + 1].as_slice())
             .is_err());
-        assert_eq!(transfer.received_chunks(), 0, "refused writes store nothing");
+        assert_eq!(
+            transfer.received_chunks(),
+            0,
+            "refused writes store nothing"
+        );
         assert!(transfer.write_chunk(0, chunk_of(&contents, 0)).unwrap());
         assert!(!transfer.write_chunk(0, chunk_of(&contents, 0)).unwrap());
         assert!(transfer.write_chunk(1, chunk_of(&contents, 1)).unwrap());
@@ -1062,8 +1060,7 @@ mod tests {
             id: offer.id,
             ..offer_for(&contents, "hashed.bin")
         };
-        let mut retry =
-            Transfer::incoming(&root, good.clone(), TransferPolicy::default()).unwrap();
+        let mut retry = Transfer::incoming(&root, good.clone(), TransferPolicy::default()).unwrap();
         retry.receive_offer().unwrap();
         let plan = retry.begin().unwrap();
         assert_eq!(plan.received_chunks, 0, "discarded bytes do not come back");
@@ -1097,8 +1094,7 @@ mod tests {
         assert!(transfer.refuse("too late").is_err());
         assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
 
-        let mut idle =
-            Transfer::incoming(&root, offer.clone(), TransferPolicy::default()).unwrap();
+        let mut idle = Transfer::incoming(&root, offer.clone(), TransferPolicy::default()).unwrap();
         assert!(idle.pause().is_err(), "nothing to pause before a begin");
         assert!(idle.finish().is_err());
         idle.receive_offer().unwrap();
@@ -1166,7 +1162,11 @@ mod tests {
             Transfer::incoming(&root, offer.clone(), TransferPolicy::default()).unwrap();
         revived.receive_offer().unwrap();
         revived.begin().unwrap();
-        assert_eq!(revived.received_chunks(), 0, "bad index records are dropped");
+        assert_eq!(
+            revived.received_chunks(),
+            0,
+            "bad index records are dropped"
+        );
         assert_eq!(revived.next_index(), 0);
         revived.write_chunk(0, chunk_of(&contents, 0)).unwrap();
         revived.write_chunk(1, chunk_of(&contents, 1)).unwrap();
