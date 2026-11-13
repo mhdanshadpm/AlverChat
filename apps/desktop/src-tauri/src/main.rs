@@ -723,6 +723,62 @@ fn send_message_blocking(
     })
 }
 #[tauri::command]
+fn mark_as_read(app: AppHandle, chat_id: String) {
+    if let Ok(mut peers) = app.state::<OverlayState>().peers.lock() {
+        if let Some(peer) = peers.iter_mut().find(|peer| peer.id == chat_id) {
+            peer.unread = None;
+        }
+    }
+    publish(&app);
+}
+
+#[tauri::command]
+fn delete_message_local(app: AppHandle, message_id: String) -> Result<bool, String> {
+    let state = app.state::<OverlayState>();
+    let id = Uuid::parse_str(&message_id).map_err(|e| e.to_string())?;
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|_| "message store lock poisoned")?;
+    store.tombstone_message(id, "local")
+}
+
+#[tauri::command]
+fn edit_message_local(app: AppHandle, message_id: String, text: String) -> Result<bool, String> {
+    let state = app.state::<OverlayState>();
+    let id = Uuid::parse_str(&message_id).map_err(|e| e.to_string())?;
+    let text = text.trim();
+    if text.is_empty() || text.len() > 16_384 {
+        return Err("Message must contain 1-16384 bytes".into());
+    }
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let clock = Hlc {
+        physical_ms: now_ms,
+        logical: 0,
+    };
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|_| "message store lock poisoned")?;
+    store.edit_message(id, "local", text, clock)
+}
+
+#[tauri::command]
+fn get_my_identity(app: AppHandle) -> serde_json::Value {
+    let state = app.state::<OverlayState>();
+    let peer_id = state.identity.peer_id();
+    let key_bytes = state.identity.verifying_key().to_bytes();
+    let fingerprint = alver_core::peer_id(&key_bytes);
+    serde_json::json!({
+        "peerId": peer_id,
+        "fingerprint": fingerprint,
+    })
+}
+
+#[tauri::command]
 fn overlay_snapshot(app: AppHandle) -> OverlaySnapshot {
     snapshot(&app)
 }
@@ -1732,6 +1788,10 @@ fn main() {
             reset_overlay_position,
             set_snap_to_edge,
             set_bubble_settings,
+            mark_as_read,
+            delete_message_local,
+            edit_message_local,
+            get_my_identity,
             resize_dock,
             open_dock_menu,
             hide_menu,

@@ -22,4 +22,8 @@ export const tauriBridge: PlatformBridge = {
   resetOverlayPosition: () => invoke<void>('reset_overlay_position'),
   setSnapToEdge: (enabled) => invoke<void>('set_snap_to_edge', { enabled }),
   setBubbleSettings: (enabled, autoHideSeconds) => invoke<void>('set_bubble_settings', { enabled, autoHideSeconds }),
+  markAsRead: (chatId) => invoke<void>('mark_as_read', { chatId }),
+  deleteMessageLocal: (messageId) => invoke<boolean>('delete_message_local', { messageId }),
+  editMessageLocal: (messageId, text) => invoke<boolean>('edit_message_local', { messageId, text }),
+  getMyIdentity: () => invoke<{ peerId: string; fingerprint: string }>('get_my_identity'),
 };

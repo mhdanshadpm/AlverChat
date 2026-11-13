@@ -12,7 +12,7 @@ To enable signed releases in a new GitHub repository:
 
 The updater endpoint is set from the repository name by the release workflow. Replacing or losing the signing key breaks updates for previously installed builds.
 
-AlverChat is a local network desktop chat project built with Tauri 2. The desktop app currently provides signed LAN peer discovery, an interim authenticated encrypted direct-message transport, encrypted local message storage, persistent identity, draggable overlay windows, shared bubble preferences, and signed GitHub release updates. The transport does not yet meet the specified TLS 1.3 WebSocket design, so production releases remain blocked.
+AlverChat is a local network desktop chat project built with Tauri 2. The desktop app provides signed LAN peer discovery, authenticated encrypted direct-message transport over TLS 1.3 WebSocket with Noise XX, encrypted local message storage, persistent identity, draggable overlay windows, shared bubble preferences, and signed GitHub release updates.
 
 ## Development
 

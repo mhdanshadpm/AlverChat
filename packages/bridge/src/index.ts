@@ -22,6 +22,10 @@ export interface PlatformBridge {
   resetOverlayPosition(): Promise<void>;
   setSnapToEdge(enabled:boolean): Promise<void>;
   setBubbleSettings(enabled:boolean,autoHideSeconds:number): Promise<void>;
+  markAsRead(chatId:string): Promise<void>;
+  deleteMessageLocal(messageId:string): Promise<boolean>;
+  editMessageLocal(messageId:string,text:string): Promise<boolean>;
+  getMyIdentity(): Promise<{ peerId: string; fingerprint: string }>;
 }
 
 const noBrowserPeers:Peer[] = [];
@@ -45,6 +49,10 @@ export const emptyBrowserBridge:PlatformBridge = {
  ,async resetOverlayPosition(){/* browser preview */}
  ,async setSnapToEdge(){/* browser preview */}
  ,async setBubbleSettings(){/* browser preview */}
+ ,async markAsRead(){/* browser preview */}
+ ,async deleteMessageLocal(){return true}
+ ,async editMessageLocal(){return true}
+ ,async getMyIdentity(){return { peerId: 'browser-preview', fingerprint: 'preview-fingerprint' }}
 };
 
 export async function bridgeForRuntime():Promise<PlatformBridge>{
