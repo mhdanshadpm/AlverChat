@@ -23,13 +23,12 @@ export interface PlatformBridge {
   setSnapToEdge(enabled:boolean): Promise<void>;
 }
 
-const peers:Peer[] = [];
-const messages:Record<string,ChatMessage[]> = {};
-export const mockBridge:PlatformBridge = {
- async listPeers(){return peers},
- async listMessages(id){return messages[id] ?? []},
+const noBrowserPeers:Peer[] = [];
+export const emptyBrowserBridge:PlatformBridge = {
+ async listPeers(){return noBrowserPeers},
+ async listMessages(){return []},
  async sendMessage(){throw new Error('Messaging is unavailable outside the AlverChat desktop app.')},
- async overlaySnapshot(){return {peers,unreadTotal:peers.reduce((sum,p)=>sum+(p.unread??0),0),open:false,dockSide:'right',snapToEdge:true}}
+ async overlaySnapshot(){return {peers:noBrowserPeers,unreadTotal:0,open:false,dockSide:'right',snapToEdge:true}}
  ,async toggleCompact(){/* browser preview */}
  ,async hideCompact(){/* browser preview */}
  ,async openFullApp(){/* browser preview */}
@@ -51,5 +50,5 @@ export async function bridgeForRuntime():Promise<PlatformBridge>{
     const { tauriBridge } = await import('./tauri');
     return tauriBridge;
   }
-  return mockBridge;
+  return emptyBrowserBridge;
 }

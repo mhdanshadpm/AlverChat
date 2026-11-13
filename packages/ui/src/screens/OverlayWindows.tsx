@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { MessageCircle, Reply, Search, Send, UsersRound, X, ChevronRight } from 'lucide-react';
-import { bridgeForRuntime, mockBridge, type OverlaySnapshot, type Peer, type PlatformBridge } from '../../../bridge/src';
+import { bridgeForRuntime, emptyBrowserBridge, type OverlaySnapshot, type Peer, type PlatformBridge } from '../../../bridge/src';
 
 function Avatar({ peer }: { peer: Peer }) {
   return <span className={`avatar ${peer.color} ${peer.group ? 'group' : ''}`}>{peer.group ? <UsersRound size={17}/> : peer.initials}<i className={peer.online ? 'online' : ''}/></span>;
 }
 
 function useOverlayState() {
-  const [bridge, setBridge] = useState<PlatformBridge>(mockBridge);
+  const [bridge, setBridge] = useState<PlatformBridge>(emptyBrowserBridge);
   const [state, setState] = useState<OverlaySnapshot>({ peers: [], unreadTotal: 0, open: false, dockSide: 'right', snapToEdge: true });
   useEffect(() => { let unlisten: (() => void) | undefined; let mounted = true;
     void bridgeForRuntime().then(async next => { if (!mounted) return; setBridge(next); setState(await next.overlaySnapshot());

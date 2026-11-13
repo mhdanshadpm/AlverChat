@@ -6,7 +6,7 @@ packages/ui  ->  packages/bridge (PlatformBridge)  ->  apps/desktop (Tauri)
                                                 ->  crates/alver-core
 ```
 
-`alver-core` has no Tauri or OS dependencies. `alver-platform` owns OS services. UI components use the bridge contract; `mockBridge` is an empty browser-development adapter and does not seed sample conversations.
+`alver-core` has no Tauri or OS dependencies. `alver-platform` owns OS services. UI components use the bridge contract; `emptyBrowserBridge` is a browser-development adapter without peer data, and its message-send operation fails explicitly.
 
 ## Implemented foundation
 
