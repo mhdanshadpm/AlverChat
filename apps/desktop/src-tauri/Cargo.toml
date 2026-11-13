@@ -25,6 +25,12 @@ rcgen.workspace = true
 x509-parser.workspace = true
 futures-util.workspace = true
 ed25519-dalek.workspace = true
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-opener = "2"
+chrono = "0.4"
+if-addrs = "0.15"
 
 [target.'cfg(target_os = "macos")'.dependencies.keyring]
 version = "3.6.3"

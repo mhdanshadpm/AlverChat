@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod drag;
+mod platform;
 mod websocket;
 
 use alver_core::{
@@ -20,7 +21,7 @@ use std::{
     fs, io,
     net::{TcpListener, TcpStream, ToSocketAddrs},
     path::PathBuf,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicU16, AtomicUsize, Ordering},
     sync::{Arc, Mutex},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -29,6 +30,67 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use uuid::Uuid;
+
+/// Port of the TLS peer listener, published for the diagnostics screen.
+static LISTENER_PORT: AtomicU16 = AtomicU16::new(0);
+
+pub fn listener_port() -> u16 {
+    LISTENER_PORT.load(Ordering::Acquire)
+}
+
+/// Identity summary used by exports and the About screen.
+pub fn identity_summary(app: &AppHandle) -> serde_json::Value {
+    let identity = &app.state::<OverlayState>().identity;
+    serde_json::json!({
+        "peerId": identity.peer_id(),
+        "fingerprint": identity.fingerprint(),
+    })
+}
+
+/// Tray label for the current Do-Not-Disturb choice.
+const TRAY_ID: &str = "alverchat-tray";
+
+fn refresh_tray(app: &AppHandle) {
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        if let Ok(menu) = rebuild_tray_menu(app) {
+            let _ = tray.set_menu(Some(menu));
+        }
+    }
+}
+
+fn dnd_menu_title(app: &AppHandle) -> String {
+    let state = app.state::<platform::SettingsState>();
+    let settings = state.snapshot();
+    if settings.dnd_enabled {
+        "Do Not Disturb: On"
+    } else {
+        "Do Not Disturb: Off"
+    }
+    .to_string()
+}
+
+fn rebuild_tray_menu(app: &AppHandle) -> Result<tauri::menu::Menu<tauri::Wry>, String> {
+    let settings = app.state::<platform::SettingsState>().snapshot();
+    let item = |id: &str, title: String| {
+        MenuItem::with_id(app, id, title, true, None::<&str>).map_err(|error| error.to_string())
+    };
+    let show = item("show", "Open AlverChat".to_string())?;
+    let mute = item(
+        "mute",
+        format!(
+            "Mute all notifications: {}",
+            if settings.notifications_muted {
+                "On"
+            } else {
+                "Off"
+            }
+        ),
+    )?;
+    let dnd = item("dnd", dnd_menu_title(app))?;
+    let reset = item("reset-position", "Reset icon position".to_string())?;
+    let quit = item("quit", "Quit".to_string())?;
+    Menu::with_items(app, &[&show, &mute, &dnd, &reset, &quit]).map_err(|error| error.to_string())
+}
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -83,18 +145,6 @@ struct SavedDockPosition {
 #[serde(rename_all = "camelCase")]
 struct OverlayPreferences {
     dock_position: Option<SavedDockPosition>,
-    #[serde(default = "default_true")]
-    snap_to_edge: bool,
-    #[serde(default = "default_true")]
-    bubbles_enabled: bool,
-    #[serde(default = "default_bubble_delay")]
-    bubble_auto_hide_seconds: u8,
-}
-fn default_true() -> bool {
-    true
-}
-fn default_bubble_delay() -> u8 {
-    8
 }
 struct OverlayState {
     compact_open: Mutex<bool>,
@@ -165,6 +215,10 @@ fn snapshot(app: &AppHandle) -> OverlaySnapshot {
     let open = state.compact_open.lock().map(|v| *v).unwrap_or(false);
     let peers = state.peers.lock().map(|v| v.clone()).unwrap_or_default();
     let unread_total = peers.iter().map(|peer| peer.unread.unwrap_or(0)).sum();
+    let settings = app
+        .try_state::<platform::SettingsState>()
+        .map(|state| state.snapshot())
+        .unwrap_or_default();
     OverlaySnapshot {
         peers,
         unread_total,
@@ -179,21 +233,9 @@ fn snapshot(app: &AppHandle) -> OverlaySnapshot {
                     .unwrap_or(Edge::Right)
             })
             .unwrap_or(Edge::Right),
-        snap_to_edge: state
-            .preferences
-            .lock()
-            .map(|p| p.snap_to_edge)
-            .unwrap_or(true),
-        bubbles_enabled: state
-            .preferences
-            .lock()
-            .map(|p| p.bubbles_enabled)
-            .unwrap_or(true),
-        bubble_auto_hide_seconds: state
-            .preferences
-            .lock()
-            .map(|p| p.bubble_auto_hide_seconds)
-            .unwrap_or(8),
+        snap_to_edge: settings.snap_to_edge,
+        bubbles_enabled: settings.bubbles_enabled,
+        bubble_auto_hide_seconds: settings.bubble_auto_hide_seconds,
     }
 }
 fn publish(app: &AppHandle) {
@@ -265,6 +307,7 @@ fn start_secure_listener(app: AppHandle, identity: Arc<Identity>) -> Result<u16,
         .local_addr()
         .map_err(|error| error.to_string())?
         .port();
+    LISTENER_PORT.store(port, Ordering::Release);
     thread::Builder::new()
         .name("alverchat-secure-listener".into())
         .spawn(move || loop {
@@ -379,6 +422,32 @@ fn handle_peer_session(
             }
         }
         publish(&app);
+        if is_new {
+            let now_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let settings = app.state::<platform::SettingsState>().snapshot();
+            let focused = app
+                .get_webview_window("main")
+                .and_then(|main| main.is_focused().ok())
+                .unwrap_or(false);
+            if !focused && platform::should_notify(&settings, &remote.peer_id, now_ms) {
+                let sender = app
+                    .state::<OverlayState>()
+                    .peers
+                    .lock()
+                    .ok()
+                    .and_then(|peers| {
+                        peers
+                            .iter()
+                            .find(|peer| peer.id == remote.peer_id)
+                            .map(|peer| peer.name.clone())
+                    })
+                    .unwrap_or_else(|| "New message".into());
+                platform::notify_message(&app, &sender, body);
+            }
+        }
         let receipt = Envelope {
             v: PROTOCOL_VERSION,
             id: Uuid::now_v7(),
@@ -938,18 +1007,7 @@ fn reset_overlay_position(app: AppHandle) -> Result<(), String> {
 }
 #[tauri::command]
 fn set_snap_to_edge(app: AppHandle, enabled: bool) -> Result<(), String> {
-    let state = app.state::<OverlayState>();
-    let mut prefs = state
-        .preferences
-        .lock()
-        .map_err(|_| "preferences lock poisoned")?;
-    let old = prefs.clone();
-    prefs.snap_to_edge = enabled;
-    if let Err(error) = persist_preferences(&app, &prefs) {
-        *prefs = old;
-        return Err(error);
-    }
-    drop(prefs);
+    update_app_settings(&app, |settings| settings.snap_to_edge = enabled)?;
     publish(&app);
     Ok(())
 }
@@ -959,21 +1017,29 @@ fn set_bubble_settings(app: AppHandle, enabled: bool, auto_hide_seconds: u8) -> 
     if !(1..=60).contains(&auto_hide_seconds) {
         return Err("Bubble auto-hide delay must be between 1 and 60 seconds.".into());
     }
-    let state = app.state::<OverlayState>();
-    let mut prefs = state
-        .preferences
-        .lock()
-        .map_err(|_| "preferences lock poisoned")?;
-    let old = prefs.clone();
-    prefs.bubbles_enabled = enabled;
-    prefs.bubble_auto_hide_seconds = auto_hide_seconds;
-    if let Err(error) = persist_preferences(&app, &prefs) {
-        *prefs = old;
-        return Err(error);
-    }
-    drop(prefs);
+    update_app_settings(&app, |settings| {
+        settings.bubbles_enabled = enabled;
+        settings.bubble_auto_hide_seconds = auto_hide_seconds;
+    })?;
     publish(&app);
     Ok(())
+}
+
+/// Mutate the shared app settings, persist them, and broadcast the change.
+fn update_app_settings(
+    app: &AppHandle,
+    mutate: impl FnOnce(&mut platform::AppSettings),
+) -> Result<platform::AppSettings, String> {
+    let state = app
+        .try_state::<platform::SettingsState>()
+        .ok_or("settings state is unavailable")?;
+    let mut guard = state
+        .0
+        .lock()
+        .map_err(|_| "settings lock poisoned".to_string())?;
+    mutate(&mut guard);
+    platform::persist(app, &guard)?;
+    Ok(guard.clone())
 }
 
 fn persist_preferences(app: &AppHandle, prefs: &OverlayPreferences) -> Result<(), String> {
@@ -1198,7 +1264,9 @@ fn save_and_snap_dock(
         work,
         (old_offset_x, offset_y),
         icon_size,
-        prefs_snapshot.snap_to_edge,
+        app.state::<platform::SettingsState>()
+            .snapshot()
+            .snap_to_edge,
         (24.0 * scale).round() as i32,
     );
     let (new_offset_x, _, _) = icon_offset(dock, edge, scale)?;
@@ -1656,7 +1724,24 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
+            let settings = platform::load_settings(app.handle());
+            app.manage(platform::SettingsState(Arc::new(Mutex::new(
+                settings.clone(),
+            ))));
+            if settings.launch_at_login {
+                let _ = platform::apply_autostart(app.handle(), true);
+            }
+            if let Err(error) = platform::register_hotkey(app.handle(), &settings.hotkey) {
+                eprintln!("Global shortcut is unavailable: {error}");
+            }
             let preferences_path = app.path().app_config_dir()?.join("overlay-settings.json");
             if let Some(parent) = preferences_path.parent() {
                 fs::create_dir_all(parent)?;
@@ -1666,9 +1751,6 @@ fn main() {
                 .and_then(|data| serde_json::from_slice(&data).ok())
                 .unwrap_or(OverlayPreferences {
                     dock_position: None,
-                    snap_to_edge: true,
-                    bubbles_enabled: true,
-                    bubble_auto_hide_seconds: 8,
                 });
             let store = open_message_store(app.handle()).map_err(std::io::Error::other)?;
             let initial_peers = known_peers(&store).map_err(std::io::Error::other)?;
@@ -1694,25 +1776,41 @@ fn main() {
                 Ok(()) => {}
                 Err(error) => eprintln!("LAN discovery is unavailable: {error}"),
             }
-            let show = MenuItem::with_id(app, "show", "Open AlverChat", true, None::<&str>)?;
-            let reset = MenuItem::with_id(
-                app,
-                "reset-position",
-                "Reset icon position",
-                true,
-                None::<&str>,
-            )?;
-            let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let tray_menu = Menu::with_items(app, &[&show, &reset, &quit])?;
+            let tray_menu = rebuild_tray_menu(app.handle())?;
             let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png"))?;
-            TrayIconBuilder::new()
+            TrayIconBuilder::with_id(TRAY_ID)
                 .icon(icon)
                 .menu(&tray_menu)
+                .tooltip(alver_core::APP_NAME)
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "show" => {
                         if let Some(main) = app.get_webview_window("main") {
                             let _ = main.show();
                             let _ = main.set_focus();
+                        }
+                    }
+                    "mute" => {
+                        let next = !app
+                            .state::<platform::SettingsState>()
+                            .snapshot()
+                            .notifications_muted;
+                        if let Ok(settings) =
+                            update_app_settings(app, |prefs| prefs.notifications_muted = next)
+                        {
+                            let _ = app.emit("settings-changed", settings);
+                            refresh_tray(app);
+                        }
+                    }
+                    "dnd" => {
+                        let next = !app
+                            .state::<platform::SettingsState>()
+                            .snapshot()
+                            .dnd_enabled;
+                        if let Ok(settings) =
+                            update_app_settings(app, |prefs| prefs.dnd_enabled = next)
+                        {
+                            let _ = app.emit("settings-changed", settings);
+                            refresh_tray(app);
                         }
                     }
                     "reset-position" => {
@@ -1795,7 +1893,24 @@ fn main() {
             resize_dock,
             open_dock_menu,
             hide_menu,
-            quit_app
+            quit_app,
+            platform::get_settings,
+            platform::update_settings,
+            platform::set_hotkey,
+            platform::set_launch_at_login,
+            platform::is_dnd_active,
+            platform::set_lan_passphrase,
+            platform::has_lan_passphrase,
+            platform::permission_status,
+            platform::open_permission_settings,
+            platform::open_firewall_guide,
+            platform::run_connection_test,
+            platform::create_backup,
+            platform::list_backups,
+            platform::restore_backup,
+            platform::export_data,
+            platform::reveal_path,
+            platform::set_muted_chat
         ])
         .run(tauri::generate_context!())
         .expect("failed to run AlverChat");
