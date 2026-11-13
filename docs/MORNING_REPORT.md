@@ -16,7 +16,7 @@ Updated 2026-11-13 (Asia/Kolkata). The product is still incomplete and should no
 
 - Signed discovery currently does not have an active transport listener. Messaging is explicitly unavailable; there is no TLS/WebSocket, TOFU trust store, peer heartbeat, reconnect, send/receive, or outbox delivery integration.
 - Groups, file transfer, receipts, message synchronization, calls/WebRTC, screen sharing, incoming call UI, profile/avatar sync, announcement sync, backup/export/restore, and most notification/call/privacy settings are not implemented.
-- Windows/macOS hosted CI run 43389740873 is in progress. Native window behavior has not been visually validated in this session; the computer-use bridge returned `noWindowsAvailable`.
+- Hosted CI run 43389740873 passed UI and macOS; Windows Clippy is still running. A follow-up checks the latest source. Native window behavior has not been visually validated in this session; the computer-use bridge returned `noWindowsAvailable`.
 - macOS notarization and Windows/macOS code signing certificates are not configured. Release installers will require platform trust setup before broad public distribution.
 
 ## Local validation
