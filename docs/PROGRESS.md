@@ -1,10 +1,10 @@
 # Build progress
 
-Updated 2026-11-13 (Asia/Kolkata).
+Updated 2026-11-13 10:29 (Asia/Kolkata).
 
 - [x] Phase 1 — workspace, CI, tokens, bridge, mock mode, component gallery (2026-11-13 09:36 Asia/Kolkata)
 - [ ] Phase 2 — core identity, security, discovery, transport, storage, outbox (in progress 2026-11-13 09:42 Asia/Kolkata: identity/signatures, Argon2id/XChaCha helper, SQLCipher schema/FTS/outbox API, protocol/HLC with size/version validation, mDNS advertisement/browse, signed UDP beacon; TLS WebSocket and keychain wiring remain)
-- [ ] Phase 3 — messaging, groups, files, search (in progress 2026-11-13 09:55 Asia/Kolkata: mock chat search, send, custom context menu, reply/edit/local-delete/tombstone, People/Groups lists; persistent Rust message primitives and outbox are available)
+- [ ] Phase 3 — messaging, groups, files, search (in progress 2026-11-13 10:29 Asia/Kolkata: mock chat search/send, custom context menu, reply/edit/local-delete/tombstone, People/Groups lists, local group creation with member selection and avatar color; persistent Rust message primitives and outbox are available)
 - [ ] Phase 4 — dock, floating icon, bubbles, compact window
 - [ ] Phase 5 — full UI screens and interactions (in progress 2026-11-13 10:23 Asia/Kolkata: profile/onboarding, People/Groups, every settings category, context actions, LAN announcement/acknowledgement mock)
 - [ ] Phase 6 — calls and screen sharing (call window previews for voice/video/group; media/signaling not connected)
@@ -12,4 +12,4 @@ Updated 2026-11-13 (Asia/Kolkata).
 - [ ] Phase 8 — hardening, accessibility, packaging, docs
 - [ ] Phase 9 — optional legacy/mobile stubs
 
-Screens implemented as mock UI: full chat, people, groups, call history, voice/video/group call previews, profile, three-step onboarding, all settings categories, LAN announcements, floating icon/bubbles, compact quick-chat drawer, component gallery. Interactions include chat search, send, context menu, reply/edit/delete, theme, and profile edits. Remaining: native always-on-top dock/bubbles, real compact-window resizing, persistent settings/profile, live network group/file actions, TLS calls/signaling and WebRTC. This is a foundation build; later phases are not yet complete.
+Screens implemented as mock UI: full chat, people, groups (including local group creation with member selection and avatar color), call history, voice/video/group call previews, profile, three-step onboarding, all settings categories, LAN announcements, floating icon/bubbles, compact quick-chat drawer, component gallery. Interactions include chat search, send, context menu, reply/edit/delete, theme, and profile edits. Remaining: native always-on-top dock/bubbles, real compact-window resizing, persistent settings/profile, live network group/file actions, TLS calls/signaling and WebRTC. This is a foundation build; later phases are not yet complete.
