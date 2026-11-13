@@ -1667,7 +1667,7 @@ fn set_native_overlay_level(window: &WebviewWindow) {
 fn set_native_overlay_level(_window: &WebviewWindow) {}
 
 fn database_key() -> Result<[u8; 32], String> {
-    let entry = keyring::Entry::new("AlverChat", "database-encryption-key")
+    let entry = keyring::Entry::new(&keychain_service(), "database-encryption-key")
         .map_err(|error| format!("Cannot access the system credential store: {error}"))?;
     let secret = match entry.get_secret() {
         Ok(secret) => secret,
@@ -1687,7 +1687,7 @@ fn database_key() -> Result<[u8; 32], String> {
 }
 
 fn identity_key() -> Result<Identity, String> {
-    let entry = keyring::Entry::new("AlverChat", "peer-identity-signing-key")
+    let entry = keyring::Entry::new(&keychain_service(), "peer-identity-signing-key")
         .map_err(|error| format!("Cannot access the system credential store: {error}"))?;
     let secret = match entry.get_secret() {
         Ok(secret) => secret,
@@ -1708,16 +1708,55 @@ fn identity_key() -> Result<Identity, String> {
 }
 
 fn open_message_store(app: &AppHandle) -> Result<Store, String> {
-    let directory = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| error.to_string())?;
+    let directory = instance_data_dir(app)?;
     fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
     let path = directory.join("messages.db");
     let path = path
         .to_str()
         .ok_or("The app data path is not valid UTF-8")?;
     Store::open(path, &database_key()?)
+}
+
+/// Label of the running instance. `pnpm dev:peers` gives each copy its own
+/// label so several installs can share one machine without merging their
+/// identity, keychain entries or databases.
+fn instance_label() -> Option<String> {
+    std::env::var("ALVERCHAT_MOCK_PEER")
+        .ok()
+        .filter(|value| !value.is_empty())
+}
+
+fn env_directory(variable: &str) -> Option<PathBuf> {
+    std::env::var(variable)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+pub fn instance_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    env_directory("ALVERCHAT_DATA_DIR").map_or_else(
+        || app.path().app_data_dir().map_err(|error| error.to_string()),
+        Ok,
+    )
+}
+
+pub fn instance_config_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    env_directory("ALVERCHAT_CONFIG_DIR").map_or_else(
+        || {
+            app.path()
+                .app_config_dir()
+                .map_err(|error| error.to_string())
+        },
+        Ok,
+    )
+}
+
+/// Keychain service for this instance; dev peers get an isolated namespace.
+pub fn keychain_service() -> String {
+    match instance_label() {
+        Some(label) => format!("{} dev peer {}", alver_core::APP_NAME, label),
+        None => alver_core::APP_NAME.to_string(),
+    }
 }
 
 fn main() {
@@ -1742,7 +1781,7 @@ fn main() {
             if let Err(error) = platform::register_hotkey(app.handle(), &settings.hotkey) {
                 eprintln!("Global shortcut is unavailable: {error}");
             }
-            let preferences_path = app.path().app_config_dir()?.join("overlay-settings.json");
+            let preferences_path = instance_config_dir(app.handle())?.join("overlay-settings.json");
             if let Some(parent) = preferences_path.parent() {
                 fs::create_dir_all(parent)?;
             }

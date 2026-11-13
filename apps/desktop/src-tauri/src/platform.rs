@@ -16,7 +16,6 @@ use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
 
 pub const SETTINGS_FILE: &str = "settings.json";
-pub const PASSPHRASE_SERVICE: &str = "AlverChat";
 pub const PASSPHRASE_ACCOUNT: &str = "lan-passphrase";
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -136,10 +135,7 @@ impl SettingsState {
 }
 
 fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let directory = app
-        .path()
-        .app_config_dir()
-        .map_err(|error| error.to_string())?;
+    let directory = crate::instance_config_dir(app)?;
     std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
     Ok(directory.join(SETTINGS_FILE))
 }
@@ -453,7 +449,7 @@ pub fn is_dnd_active(app: AppHandle) -> bool {
 
 #[tauri::command]
 pub fn set_lan_passphrase(app: AppHandle, passphrase: String) -> Result<bool, String> {
-    let entry = keyring::Entry::new(PASSPHRASE_SERVICE, PASSPHRASE_ACCOUNT)
+    let entry = keyring::Entry::new(&crate::keychain_service(), PASSPHRASE_ACCOUNT)
         .map_err(|error| format!("Cannot access the credential store: {error}"))?;
     if passphrase.is_empty() {
         match entry.delete_credential() {
@@ -480,7 +476,7 @@ pub fn set_lan_passphrase(app: AppHandle, passphrase: String) -> Result<bool, St
 
 #[tauri::command]
 pub fn has_lan_passphrase() -> bool {
-    keyring::Entry::new(PASSPHRASE_SERVICE, PASSPHRASE_ACCOUNT)
+    keyring::Entry::new(&crate::keychain_service(), PASSPHRASE_ACCOUNT)
         .and_then(|entry| entry.get_secret())
         .map(|secret| !secret.is_empty())
         .unwrap_or(false)
@@ -603,20 +599,13 @@ pub struct BackupResult {
 }
 
 fn backup_directory(app: &AppHandle) -> Result<PathBuf, String> {
-    let directory = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| error.to_string())?
-        .join("Backups");
+    let directory = crate::instance_data_dir(app)?.join("Backups");
     std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
     Ok(directory)
 }
 
 fn bundle_plaintext(app: &AppHandle) -> Result<Vec<u8>, String> {
-    let data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| error.to_string())?;
+    let data_dir = crate::instance_data_dir(app)?;
     let settings = app.state::<SettingsState>().snapshot();
     let database = data_dir.join("messages.db");
     let database_bytes = std::fs::read(&database).unwrap_or_default();
@@ -767,11 +756,7 @@ pub fn restore_backup(app: AppHandle, path: String, passphrase: String) -> Resul
     if let Some(encoded) = value.get("databaseBase64").and_then(|v| v.as_str()) {
         let bytes = unbase64_bytes(encoded)?;
         if !bytes.is_empty() {
-            let database = app
-                .path()
-                .app_data_dir()
-                .map_err(|error| error.to_string())?
-                .join("messages.db");
+            let database = crate::instance_data_dir(&app)?.join("messages.db");
             std::fs::write(&database, bytes).map_err(|error| error.to_string())?;
         }
     }
@@ -797,11 +782,7 @@ pub struct ExportResult {
 
 #[tauri::command]
 pub fn export_data(app: AppHandle) -> Result<ExportResult, String> {
-    let directory = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| error.to_string())?
-        .join("Exports");
+    let directory = crate::instance_data_dir(&app)?.join("Exports");
     std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
     let state = app.state::<crate::OverlayState>();
     let mut chats = serde_json::Map::new();
@@ -853,10 +834,7 @@ pub fn export_data(app: AppHandle) -> Result<ExportResult, String> {
 
 #[tauri::command]
 pub fn reveal_path(app: AppHandle, path: String) -> Result<(), String> {
-    let directory = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| error.to_string())?;
+    let directory = crate::instance_data_dir(&app)?;
     let candidate = Path::new(&path);
     if !candidate.starts_with(&directory) {
         return Err("Only AlverChat data files can be revealed.".into());
