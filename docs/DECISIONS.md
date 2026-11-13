@@ -40,3 +40,16 @@
 - Narrow windows use the `mobile-chat` class to swap list and conversation panes; the designs only show the three-pane desktop layout, so this is the closest reading of the existing `.app` grid.
 - Every call CTA toasts "unavailable until LAN call signaling is connected" while `listCalls` history renders for real, so the Calls screen shows what exists without advertising what does not.
 - The shell refreshes a thread through a `revision` counter bumped by `messages-changed`, with a `seenRevision` guard plus `key={chat.id}`, because a per-chat event subscription would re-subscribe on every chat switch.
+
+## Phase 3/4 commands, typing and read state — 2026-11-13 20:55
+
+- Reply quoting became an `Option<Uuid>` side-channel (`enqueue_quoted_message`, `set_reply_to`, `reply_to_for`, `replies_for_chat`) plus migration v5, instead of a `reply_to` field on `Message`: the field would have touched ~17 construction sites and broken the property the migration tests guard, that v1 rows are still written with v1-shaped SQL.
+- Read receipts (`kind = 'read'`, reader `local`) are the unread model, so "Mark unread" is durable and `mark_as_read` finally writes state. The conversation reads the unread span from `listMessages` *before* it clears it — `mark_unread` is a mutation and must not be used as a query.
+- `MessageDto.read` is only true for messages I sent (no peer read receipts exist yet) and for received messages the store has a read receipt for; the UI divider is derived from that field rather than from a second round-trip.
+- Typing became a second accepted envelope kind inside the existing peer session, answered with the same receipt frame and expired after 6 s by the discovery tick, rather than a new connection type or a timer thread: it reuses the authenticated session, and the expiry makes a lost `false` frame self-healing.
+- `deliver_envelope` was split into `send_frame` (handshake + one frame + receipt) plus the outbox acknowledgement, because typing needed the transport without the outbox.
+- Group descriptions, icons and the "left" flag live in the `settings` table keyed `group.description.<id>` / `group.icon.<id>` / `group.left.<id>`, because the signed `GroupState` format is frozen and only name and roster are covered by its signature.
+- `pinned_by` in `pinned_messages` is always this device: pins are local until a `pin` frame exists, and claiming a peer pinned it would be a lie in the UI.
+- `leave_group` only records the local `left` flag. Removing myself from the roster needs the admin's signature, and `GroupState::update_members` refuses with `CannotRemoveAdmin` for the admin themself.
+- Commands, DTOs and the `GroupPatch` input are `pub(crate)` so `generate_handler!` can name them from the crate root, and the store-lock helper uses `State::inner()` to keep the guard borrowed from the app instead of from a temporary.
+- Outgoing messages keep the literal sender id `local` while group and roster authority uses `identity.peer_id()`: switching the message actor would silently orphan existing history for `mine`, edit and tombstone checks.
