@@ -30,3 +30,11 @@
 - Announcements are stored, posted, listed and acknowledged on this device only. No `announcement` or `announcement_ack` envelope is sent, so a peer never receives a post and remote acknowledgements never arrive; the "Acknowledged by (N)" trail therefore only ever contains this device. This is the same missing group fan-out as group messages, not a UI gap.
 - The dock's persistent announcement bubble beside the floating icon is not wired: the bubble stack is fed by Rust `overlay-state`, which has no announcement channel. The full-width in-app banner is implemented instead, and the trail lives in Group Info.
 - Verified in the browser under `?mock=1` (post, acknowledge, admins-only lock, banner clear on panel ack); pixel comparison against the design boards is still blocked because Playwright is not installed.
+
+## Chunked file transfer — 2026-11-14 01:06
+
+- Resolved since the previous entry: `send_file`, `control_transfer` and `open_attachment` stream real bytes over the authenticated session. The receiver pulls, verifies blake3, resumes from a sidecar index, and pause/retry/cancel all reach the driver.
+- Not verified between two physical machines in this session. The nine socket-level tests run two identities over loopback and the dev app runs one instance by default; two machines on one LAN remain the acceptance test, including a pause/resume mid-file and a peer that disappears during a batch.
+- The bridge carries the file as a base64 data URL, so a very large file is decoded in webview memory before the command sees it. A streaming picker path is the honest fix when 500 MB files become common.
+- A process that dies mid-download leaves its row `Transferring`. The next pull for that id — a click or a peer re-offer — self-heals it, but there is no startup pass that turns stale rows into `Paused`.
+- Unchanged gaps: no read receipts from peers, no group fan-out, no avatar hash sync, no `announcement` frames, no dock announcement bubble, the LAN passphrase still gates the settings file rather than the transport, and Playwright remains uninstalled.

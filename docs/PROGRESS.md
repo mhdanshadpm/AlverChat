@@ -1,6 +1,6 @@
 # Build progress
 
-Updated 2026-11-13 21:10 (Asia/Kolkata).
+Updated 2026-11-14 01:06 (Asia/Kolkata).
 
 After a context reset, read this file first and resume at the first unchecked item.
 
@@ -8,7 +8,7 @@ After a context reset, read this file first and resume at the first unchecked it
 
 - [x] Phase 1 — Rust workspace, typed bridge, UI foundation, empty browser adapter, design assets, CI baseline. (2026-11-13)
 - [ ] Phase 2 — Ed25519 identity + signed mDNS discovery in the desktop app; identity and SQLCipher keys in the OS credential store; Noise XX over TCP, pinned peer keys, offline outbox retry, delivery acknowledgement, received-message persistence, typing frames. Remaining: required TLS 1.3 `tokio-tungstenite`, heartbeat presence, cross-device verification, LAN passphrase challenge enforced in the transport.
-- [x] Phase 3 — Encrypted local history + persistent outbox; direct exchange and receipts; reactions, pins, stars, edit/delete/forward, reply quoting (`messages.reply_to`), unread/read state, FTS search, group roster commands, announcement storage, call history, avatar cache. Remaining in later phases: group message fan-out, file chunk transfer, WebRTC signaling.
+- [x] Phase 3 — Encrypted local history + persistent outbox; direct exchange and receipts; reactions, pins, stars, edit/delete/forward, reply quoting (`messages.reply_to`), unread/read state, FTS search, group roster commands, announcement storage, call history, avatar cache. Remaining in later phases: group message fan-out, WebRTC signaling.
 - [x] Phase 4 — Native dock and compact windows: draggable, saved position, edge snapping, click-through hit testing, bubble timeout, click-to-open. Needs hands-on Windows/macOS validation.
 - [ ] Phase 5 — Screens. Every screen is built and now calls real commands; still open: the announcement bubble beside the dock icon, call UI (7.9), and OS validation of the overlays.
 - [ ] Phase 6 — Calls: layouts, signaling, WebRTC, group calls, PiP, screen sharing. Call *history* is real (`list_calls`); signaling is not connected.
@@ -21,7 +21,7 @@ After a context reset, read this file first and resume at the first unchecked it
 | Screen | UI | Desktop data path | Mock path | Status |
 | --- | --- | --- | --- | --- |
 | Chat list | done | `list_peers`, `mark_as_read`, `mark_unread`, `set_pinned_chat`, `set_muted_chat`, `clear_chat`, `delete_chat` | done | wired |
-| Conversation | done | thread, send with quote, edit, delete, reactions, pins, stars, forward, search-in-chat, attachments list, typing in and out | done | wired — file *chunks* and read receipts from peers still missing |
+| Conversation | done | thread, send with quote, edit, delete, reactions, pins, stars, forward, search-in-chat, attachments list, typing in and out, chunked file send/receive with pause, resume, cancel and open | done | wired — read receipts from peers still missing |
 | Chat details | done | `pinned_messages`, `starred_messages`, `attachments_for`, `open_attachment`, `list_calls` | done | wired |
 | Groups | done | `list_groups`, `create_group`, `update_group`, `add_group_members`, `remove_group_member`, `leave_group` | done | wired — announcement frames are not sent yet, so posts stay on this device (7.12) |
 | People | done | `list_peers`, `get_avatar` | done | wired |
@@ -39,13 +39,13 @@ After a context reset, read this file first and resume at the first unchecked it
 3. [x] `apps/desktop/src-tauri/src/commands.rs`: the 29 missing bridge commands registered over `alver-core`. (2026-11-13 20:31, committed)
 4. [x] Typing frames over the wire + read receipts as the unread source (`unread_ids_for_chat`, `MessageDto.read`, `markAsRead`). (2026-11-13 20:52, committed)
 5. [x] LAN announcements UI: composer in Group Info, full-width in-app banner with Acknowledge, "Acknowledged by (N)" trail, admins-only setting honoured. (2026-11-13 21:10)
-6. [ ] File chunks: `send_file` / `control_transfer` / `open_attachment` currently store metadata and refuse to move bytes.
+6. [x] File chunks: receiver-pulled chunk streaming over the authenticated session, blake3-verified, resumable from a sidecar index, pause/resume/retry/cancel, downloads folder + per-file progress in the bubble. `send_file` / `control_transfer` / `open_attachment` move real bytes. (2026-11-14 01:06)
 7. [ ] Phase 6 calls: `MediaEngine`, signaling over the peer session, call windows, PiP, screen share, device settings.
 8. [ ] Phase 7: i18n catalog registration, README firewall ports, updater/tray verification.
 9. [ ] Phase 8: vitest units for the bubble stack, icon state machine, DND and menu placement; screenshots of every screen in mock light+dark into `/design/_compare/`; CI stray-URL grep.
 
 ## Gates at the last recorded commit
 
-`pnpm exec tsc -b` clean · `pnpm exec eslint .` clean · `pnpm test` 90 passed · `pnpm build` ok · `cargo fmt --all -- --check` clean · `cargo test --workspace` 96 + 5 + 13 + 15 passed · `cargo clippy -p alverchat-desktop -- -D warnings` clean (the core crate is also lint-clean now).
+`pnpm exec tsc -b` clean · `pnpm exec eslint .` clean · `pnpm test` 90 passed · `pnpm build` ok · `cargo fmt --all -- --check` clean · `cargo test --workspace` 98 + 9 + 5 + 13 + 15 passed · `cargo clippy --workspace --all-targets` clean.
 
 Public repository: https://github.com/mhdanshadpm/AlverChat. The app is not production-ready until the remaining network, messaging, and platform work is completed.
