@@ -1,4 +1,4 @@
-import { DEFAULT_SETTINGS, type AppSettings, type ChatMessage, type ConnectionReport, type ExportResult, type OverlaySnapshot, type Peer, type PermissionStatus, type PlatformBridge } from './index';
+import { DEFAULT_SETTINGS, type AppSettings, type ChatMessage, type ConnectionReport, type ExportResult, type Group, type GroupPatch, type OverlaySnapshot, type Peer, type PermissionStatus, type PlatformBridge } from './index';
 
 /**
  * MOCK MODE. Selected with `?mock=1`, and `?mock=1&scenario=<name>` for a
@@ -86,6 +86,41 @@ let settings: AppSettings = { ...DEFAULT_SETTINGS, displayName: 'Muhammad Anshad
 let peers: Peer[] = [...GROUPS, ...PEOPLE];
 let seq = 0;
 
+let groups: Group[] = [
+  { id: 'everyone', name: 'Everyone', epoch: 1, admin: 'peer-arjun', members: ['peer-arjun', 'peer-fathima', 'peer-sarath', 'peer-samyuktha', 'peer-vishnu', 'peer-anu', 'peer-deepa'], isEveryone: true, isAdmin: true, description: 'Automatic group for every peer found on this network.' },
+  { id: 'chat-billing', name: 'Billing Team', epoch: 3, admin: 'me', members: ['me', 'peer-anu', 'peer-arjun', 'peer-deepa', 'peer-fathima'], isAdmin: true, icon: '\u{1F4B0}', description: 'Invoices, purchase entries and the monthly stock report.' },
+  { id: 'chat-design', name: 'Design Team', epoch: 1, admin: 'peer-sarath', members: ['me', 'peer-sarath', 'peer-samyuktha'], icon: '\u{1F3A8}' },
+  { id: 'chat-alverconnect', name: 'Project AlverConnect', epoch: 2, admin: 'me', members: ['me', 'peer-arjun', 'peer-fathima', 'peer-sarath', 'peer-samyuktha'], isAdmin: true, icon: '\u{1F680}', description: 'Launch room for the AlverConnect rollout.' },
+];
+let avatar: string | null = null;
+
+const groupMembers = (group: Group): string[] => group.members;
+const initialsFrom = (name: string): string => name.trim().split(/\s+/).slice(0, 2).map(word => word[0]?.toUpperCase() ?? '').join('') || 'G';
+
+function upsertGroupPeer(group: Group): void {
+  const existing = peers.find(peer => peer.id === group.id);
+  const next: Peer = {
+    id: group.id,
+    name: group.name,
+    initials: initialsFrom(group.name),
+    color: existing?.color ?? 'violet',
+    online: true,
+    status: `${groupMembers(group).length} members`,
+    preview: existing?.preview ?? 'Group created',
+    time: existing?.time ?? time(0),
+    unread: existing?.unread,
+    group: true,
+    pinned: existing?.pinned,
+  };
+  peers = existing ? peers.map(peer => (peer.id === group.id ? next : peer)) : [next, ...peers];
+}
+
+const saveGroup = (group: Group): Group => {
+  groups = groups.map(item => (item.id === group.id ? group : item));
+  upsertGroupPeer(group);
+  return group;
+};
+
 function scenarioPeers(): Peer[] {
   const scenario = mockScenario();
   if (scenario === 'empty' || scenario === 'scanning' || scenario === 'no-network') return [];
@@ -168,6 +203,37 @@ export const mockBridge: PlatformBridge = {
   exportData: (): Promise<ExportResult> => delay({ path: 'mock://Exports/alverchat-export.json', messages: Object.values(CONVERSATIONS).reduce((total, list) => total + list.length, 0) }),
   revealPath: () => delay(undefined),
   setMutedChat: (chatId, muted) => { peers = peers.map(peer => (peer.id === chatId ? { ...peer, muted } : peer)); settings = { ...settings, mutedChats: muted ? [...new Set([...settings.mutedChats, chatId])] : settings.mutedChats.filter(id => id !== chatId) }; return delay(settings.mutedChats); },
+  listGroups: () => delay(groups),
+  createGroup: (name, memberIds, icon) => {
+    const group: Group = { id: `chat-${++seq}`, name, epoch: 1, admin: 'me', members: ['me', ...memberIds], isAdmin: true, icon };
+    groups = [...groups, group];
+    upsertGroupPeer(group);
+    return delay(group);
+  },
+  updateGroup: (id, patch: GroupPatch) => {
+    const group = groups.find(item => item.id === id);
+    if (!group) return Promise.reject(new Error(`No group named ${id} in this mock.`));
+    return delay(saveGroup({ ...group, ...patch }));
+  },
+  addGroupMembers: (id, memberIds) => {
+    const group = groups.find(item => item.id === id);
+    if (!group) return Promise.reject(new Error(`No group named ${id} in this mock.`));
+    return delay(saveGroup({ ...group, members: [...new Set([...group.members, ...memberIds])], epoch: group.epoch + 1 }));
+  },
+  removeGroupMember: (id, peerId) => {
+    const group = groups.find(item => item.id === id);
+    if (!group) return Promise.reject(new Error(`No group named ${id} in this mock.`));
+    if (group.isEveryone) return Promise.reject(new Error('The Everyone group follows the peers visible on the network.'));
+    return delay(saveGroup({ ...group, members: group.members.filter(member => member !== peerId), epoch: group.epoch + 1 }));
+  },
+  leaveGroup: (id) => {
+    if (id === 'everyone') return Promise.reject(new Error('You cannot leave the Everyone group.'));
+    groups = groups.filter(group => group.id !== id);
+    peers = peers.filter(peer => peer.id !== id);
+    return delay(undefined);
+  },
+  setAvatar: (dataUrl) => { avatar = dataUrl; return delay(avatar); },
+  getAvatar: () => delay(avatar),
 };
 
 /** Windows-only stubs: the mock never opens native overlay windows. */

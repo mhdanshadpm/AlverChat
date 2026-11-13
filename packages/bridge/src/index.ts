@@ -3,6 +3,22 @@ export type Peer = { id:string; name:string; initials:string; color:string; onli
 export type ChatMessage = { id:string; sender:string; text:string; time:string; timestampMs?:number; mine?:boolean; read?:boolean; deliveryStatus?:'pending'|'delivered'; kind?:'text'|'file'|'event'|'deleted'; fileName?:string; edited?:boolean; replyTo?:string };
 export type OverlaySnapshot = { peers:Peer[]; unreadTotal:number; open:boolean; dockSide:'left'|'right'; snapToEdge:boolean; bubblesEnabled:boolean; bubbleAutoHideSeconds:number };
 
+/** A signed group roster as the storage layer keeps it (the epoch guards replay). */
+export type Group = {
+  id:string;
+  name:string;
+  description?:string;
+  /** Emoji plus palette colour, or a data URL when a picture was uploaded. */
+  icon?:string;
+  epoch:number;
+  admin:string;
+  members:string[];
+  /** `everyone` is the automatic all-peers group: roster and admin are fixed. */
+  isEveryone?:boolean;
+  isAdmin?:boolean;
+};
+export type GroupPatch = { name?:string; description?:string; icon?:string };
+
 /** Mirrors `platform::AppSettings` in the desktop shell. */
 export type AppSettings = {
   theme:'light'|'dark'|'system';
@@ -91,6 +107,15 @@ export interface PlatformBridge {
   exportData(): Promise<ExportResult>;
   revealPath(path:string): Promise<void>;
   setMutedChat(chatId:string,muted:boolean): Promise<string[]>;
+  listGroups(): Promise<Group[]>;
+  createGroup(name:string, memberIds:string[], icon?:string): Promise<Group>;
+  updateGroup(id:string, patch:GroupPatch): Promise<Group>;
+  addGroupMembers(id:string, memberIds:string[]): Promise<Group>;
+  removeGroupMember(id:string, peerId:string): Promise<Group>;
+  leaveGroup(id:string): Promise<void>;
+  /** Stores a 256 px, EXIF-stripped JPEG for my peer card; `null` removes it. */
+  setAvatar(avatarDataUrl:string|null): Promise<string|null>;
+  getAvatar(): Promise<string|null>;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -151,6 +176,14 @@ export const emptyBrowserBridge:PlatformBridge = {
  async exportData(){return unavailable('Export')},
  async revealPath(){/* browser preview */},
  async setMutedChat(_chatId,muted){return muted?['muted']:[]},
+ async listGroups(){return []},
+ async createGroup(){return unavailable('Groups')},
+ async updateGroup(){return unavailable('Groups')},
+ async addGroupMembers(){return unavailable('Groups')},
+ async removeGroupMember(){return unavailable('Groups')},
+ async leaveGroup(){return unavailable('Groups')},
+ async setAvatar(){return null},
+ async getAvatar(){return null},
 };
 
 export async function bridgeForRuntime():Promise<PlatformBridge>{

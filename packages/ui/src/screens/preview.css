@@ -1,0 +1,5 @@
+.preview-area { overflow: hidden; }
+.preview-scroll { flex: 1; overflow-y: auto; padding: 24px 28px 72px; background: var(--surface-2); }
+.preview-missing { display: grid; place-items: center; height: 100vh; color: var(--muted); font-size: 14px; }
+.screen-header-actions { display: flex; gap: 8px; position: absolute; top: 0; right: 0; }
+.screen-header { position: relative; }
