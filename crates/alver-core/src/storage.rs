@@ -23,6 +23,7 @@ impl Store {
                  CREATE TABLE IF NOT EXISTS chats (id TEXT PRIMARY KEY, name TEXT NOT NULL, is_group INTEGER NOT NULL DEFAULT 0);
                  CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, sender TEXT NOT NULL, body TEXT NOT NULL, physical_ms INTEGER NOT NULL, logical INTEGER NOT NULL, tombstone INTEGER NOT NULL DEFAULT 0, FOREIGN KEY(chat_id) REFERENCES chats(id));
                  CREATE INDEX IF NOT EXISTS messages_by_chat_clock ON messages(chat_id, physical_ms, logical); 
+                 CREATE TABLE IF NOT EXISTS message_revisions (message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE, revision INTEGER NOT NULL, body TEXT NOT NULL, physical_ms INTEGER NOT NULL, logical INTEGER NOT NULL, PRIMARY KEY(message_id, revision));
                  CREATE TABLE IF NOT EXISTS outbox (id TEXT PRIMARY KEY, peer_id TEXT NOT NULL, envelope BLOB NOT NULL, attempt INTEGER NOT NULL DEFAULT 0);
                  CREATE TABLE IF NOT EXISTS groups (id TEXT PRIMARY KEY, name TEXT NOT NULL, epoch INTEGER NOT NULL, state BLOB NOT NULL);
                  CREATE TABLE IF NOT EXISTS group_members (group_id TEXT NOT NULL REFERENCES groups(id) ON DELETE CASCADE, peer_id TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('admin','member')), PRIMARY KEY(group_id, peer_id));
@@ -183,6 +184,91 @@ impl Store {
             .optional()
             .map_err(|e| e.to_string())
     }
+
+    /// Apply a sender-owned edit unless a permanent tombstone already exists.
+    pub fn edit_message(
+        &mut self,
+        id: Uuid,
+        sender: &str,
+        body: &str,
+        clock: Hlc,
+    ) -> Result<bool, String> {
+        let transaction = self.connection.transaction().map_err(|e| e.to_string())?;
+        let current = transaction
+            .query_row(
+                "SELECT sender, body, tombstone FROM messages WHERE id = ?1",
+                params![id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)? != 0,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        let Some((owner, old_body, tombstone)) = current else {
+            return Ok(false);
+        };
+        if owner != sender || tombstone {
+            return Ok(false);
+        }
+        let revision: i64 = transaction
+            .query_row(
+                "SELECT COALESCE(MAX(revision), 0) + 1 FROM message_revisions WHERE message_id = ?1",
+                params![id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "INSERT INTO message_revisions(message_id, revision, body, physical_ms, logical) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![id.to_string(), revision, old_body, clock.physical_ms, clock.logical],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "UPDATE messages SET body = ?2, physical_ms = ?3, logical = ?4 WHERE id = ?1 AND sender = ?5 AND tombstone = 0",
+                params![id.to_string(), body, clock.physical_ms, clock.logical, sender],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "DELETE FROM message_search WHERE message_id = ?1",
+                params![id.to_string()],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "INSERT INTO message_search(message_id, body) VALUES (?1, ?2)",
+                params![id.to_string(), body],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok(true)
+    }
+
+    /// Delete-for-everyone keeps a durable tombstone and removes searchable text.
+    pub fn tombstone_message(&mut self, id: Uuid, sender: &str) -> Result<bool, String> {
+        let transaction = self.connection.transaction().map_err(|e| e.to_string())?;
+        let changed = transaction
+            .execute(
+                "UPDATE messages SET body = '', tombstone = 1 WHERE id = ?1 AND sender = ?2 AND tombstone = 0",
+                params![id.to_string(), sender],
+            )
+            .map_err(|error| error.to_string())?;
+        if changed == 1 {
+            transaction
+                .execute(
+                    "DELETE FROM message_search WHERE message_id = ?1",
+                    params![id.to_string()],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok(changed == 1)
+    }
 }
 
 #[cfg(test)]
@@ -253,5 +339,43 @@ mod tests {
         store.save_group_state(&state).unwrap();
         assert_eq!(store.get_group_state(&state.id).unwrap(), Some(state));
         assert!(store.save_group_state(&first_epoch).is_err());
+    }
+
+    #[test]
+    fn message_edits_are_sender_only_and_tombstones_never_resurrect() {
+        let mut store = Store::open(":memory:", &[8; 32]).unwrap();
+        let message = Message {
+            id: Uuid::now_v7(),
+            chat_id: "chat-1".into(),
+            sender: "peer-a".into(),
+            body: "original".into(),
+            clock: Hlc {
+                physical_ms: 1,
+                logical: 0,
+            },
+            tombstone: false,
+        };
+        store.save_message(&message).unwrap();
+        let edited_clock = Hlc {
+            physical_ms: 2,
+            logical: 0,
+        };
+        assert!(!store
+            .edit_message(message.id, "peer-b", "hijack", edited_clock)
+            .unwrap());
+        assert!(store
+            .edit_message(message.id, "peer-a", "edited", edited_clock)
+            .unwrap());
+        assert_eq!(
+            store.get_message(message.id).unwrap().unwrap().body,
+            "edited"
+        );
+        assert!(store.tombstone_message(message.id, "peer-a").unwrap());
+        assert!(!store
+            .edit_message(message.id, "peer-a", "resurrected", edited_clock)
+            .unwrap());
+        let deleted = store.get_message(message.id).unwrap().unwrap();
+        assert!(deleted.tombstone);
+        assert!(deleted.body.is_empty());
     }
 }
