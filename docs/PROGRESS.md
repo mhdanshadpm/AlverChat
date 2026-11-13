@@ -12,4 +12,4 @@ Updated 2026-11-13 (Asia/Kolkata).
 - [ ] Phase 8 — hardening, accessibility, packaging, docs
 - [ ] Phase 9 — optional legacy/mobile stubs
 
-Screens implemented as mock UI: full chat, people, groups, call history, profile, three-step onboarding, general settings, component gallery. Interactions include chat search, send, context menu, reply/edit/delete, theme, and profile edits. Remaining: announcements, floating dock/bubbles, compact window, detailed settings, actual group/file/call actions and WebRTC. This is a foundation build; later phases are not yet complete.
+Screens implemented as mock UI: full chat, people, groups, call history, profile, three-step onboarding, general settings, component gallery. Interactions include chat search, send, context menu, reply/edit/delete, theme, and profile edits. Remaining: announcements, native always-on-top dock/bubbles, native compact window, detailed settings, actual group/file/call actions and WebRTC. This is a foundation build; later phases are not yet complete.
