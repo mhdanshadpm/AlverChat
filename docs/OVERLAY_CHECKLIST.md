@@ -23,13 +23,13 @@ The overlay windows are created by Rust as `dock`, `compact`, and `menu` Webview
 - [ ] Windows: verify topmost behavior over borderless-fullscreen apps. Exclusive-fullscreen games are unsupported by Windows overlay windows.
 - [ ] Open Quick chats while typing in another app; verify it does not activate the main window and confirm desired keyboard focus behavior.
 - [ ] Click transparent padding around dock and panel; verify underlying apps receive clicks. Test pointer transitions into and out of hit regions.
-- [ ] Send a new message while main is hidden; verify icon/bubble updates and quick reply delivery.
+- [ ] Incoming message bubbles and quick reply cannot be verified yet because secure message transport is not implemented.
 - [ ] Test left/right placement, at least two monitors, hot-plugging, and 100%, 125%, 150%, and 200% display scaling.
 - [ ] Drag the dock and confirm compact panel follows it.
 
 ## Current implementation limits
 
-The menu route provides Open Quick chats, Open AlverChat, Reset icon position, and Quit. The Rust peer list is preview data; LAN discovery and live incoming-message transport are not implemented in this repository yet. On macOS the Tauri NSWindow receives the non-activating style mask, elevated level, and Space collection flags; it has not been converted to an NSPanel object. Windows-specific code has not been compiled on Windows in this environment. Native cursor polling now updates hit regions while the pointer crosses click-through windows, but its behavior still needs real-system validation.
+The menu route provides Open Quick chats, Open AlverChat, Reset icon position, and Quit. The native peer list updates from signed mDNS announcements, but incoming-message transport is not implemented. On macOS the Tauri NSWindow receives the non-activating style mask, elevated level, and Space collection flags; it has not been converted to an NSPanel object. Windows-specific behavior has not been run on Windows. Native cursor polling now updates hit regions while the pointer crosses click-through windows, but its behavior still needs real-system validation.
 
 ## Draggable widget checks
 

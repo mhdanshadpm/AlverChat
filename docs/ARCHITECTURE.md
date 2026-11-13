@@ -19,9 +19,9 @@ packages/ui  ->  packages/bridge (PlatformBridge)  ->  apps/desktop (Tauri)
 - Encrypted backup container primitive uses a fresh Argon2id salt and XChaCha20-Poly1305 nonce; it accepts opaque bytes and is not yet wired to database/avatar export.
 - SQLCipher-backed SQLite open/migration with peers, chats, messages, FTS and an idempotent persistent outbox API.
 - Desktop opens the SQLCipher message store under the app data directory and obtains its database key through the platform credential store; message history is read in chat-clock order and survives restart.
-- mDNS `_alverchat._tcp.local.` publication/browse and a signed, size-capped UDP broadcast beacon fallback.
-- Tauri 2 main window, CSP and bridge commands. The native command surface currently returns no discovered peers; live transport has not been connected to it.
+- The desktop app loads a stable Ed25519 identity from the OS credential store, publishes signed mDNS announcements, rejects malformed or invalid signatures, and emits verified discovered peers to the UI.
+- Tauri 2 main window, CSP, native dock/compact/menu windows, drag/position commands, overlay hit testing, and an update check/install/relaunch flow backed by signed GitHub Release artifacts.
 
 ## Not connected yet
 
-No TLS WebSocket transport, peer trust persistence, automatic outbox replay, or WebRTC session is active in this build. Native startup and browser development use empty peer/message lists. Chat delivery, discovery, calls, and trusted identity are unavailable until their transport integration is completed. Local message persistence is encrypted with a key from the OS credential store; cross-platform keychain behavior still needs release-platform validation.
+There is no TLS WebSocket transport, peer trust store, heartbeat, online presence, automatic outbox replay, or WebRTC session. mDNS discovery is live, but peers are shown as discovered and unavailable; `send_message` intentionally returns an unavailable error rather than persisting a false success. Browser development uses an empty mock adapter. Group membership, calls, files, profile/avatar sync, and backup/export/restore are not wired to network commands. Local message persistence is encrypted with a key from the OS credential store; cross-platform keychain behavior still needs release-platform validation.
