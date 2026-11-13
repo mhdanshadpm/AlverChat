@@ -1,0 +1,74 @@
+.gallery {
+  min-height: 100vh;
+  padding: 28px 32px 96px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-family: var(--font-ui, Inter, system-ui, sans-serif);
+}
+
+.gallery-head {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.gallery-head h1 { font-size: 26px; margin: 0; letter-spacing: -0.02em; }
+.gallery-head p { margin: 0; color: var(--muted); font-size: 13px; flex: 1 1 320px; }
+
+.gallery-nav {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 10px 0;
+  margin: 10px 0 18px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--line);
+}
+
+.gallery-nav a {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  text-decoration: none;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+}
+
+.gallery-nav a:hover { color: var(--accent); border-color: var(--accent2); }
+
+.gallery-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 18px; align-items: start; }
+
+.gallery-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg, 18px);
+  box-shadow: var(--shadow);
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.gallery-card > h2 { margin: 0; font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+.gallery-card > h3 { margin: 0; font-size: 15px; }
+.gallery-wide { grid-column: 1 / -1; }
+.gallery-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.gallery-stack { display: flex; flex-direction: column; gap: 10px; }
+.gallery-note { font-size: 12px; color: var(--muted); margin: 0; }
+.gallery-bubble-stage {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border-radius: 16px;
+  background: var(--surface-3);
+}
+.gallery-swatch { width: 100%; height: 44px; border-radius: 12px; border: 1px solid var(--line); }
+.gallery-code { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; color: var(--muted); }

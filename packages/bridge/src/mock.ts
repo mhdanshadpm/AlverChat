@@ -166,7 +166,7 @@ export const mockBridge: PlatformBridge = {
   ]),
   restoreBackup: () => delay(undefined),
   exportData: (): Promise<ExportResult> => delay({ path: 'mock://Exports/alverchat-export.json', messages: Object.values(CONVERSATIONS).reduce((total, list) => total + list.length, 0) }),
-  revealPath: (_path: string) => delay(undefined),
+  revealPath: () => delay(undefined),
   setMutedChat: (chatId, muted) => { peers = peers.map(peer => (peer.id === chatId ? { ...peer, muted } : peer)); settings = { ...settings, mutedChats: muted ? [...new Set([...settings.mutedChats, chatId])] : settings.mutedChats.filter(id => id !== chatId) }; return delay(settings.mutedChats); },
 };
 
