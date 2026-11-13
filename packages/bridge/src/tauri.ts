@@ -21,4 +21,5 @@ export const tauriBridge: PlatformBridge = {
   quit: () => invoke<void>('quit_app'),
   resetOverlayPosition: () => invoke<void>('reset_overlay_position'),
   setSnapToEdge: (enabled) => invoke<void>('set_snap_to_edge', { enabled }),
+  setBubbleSettings: (enabled, autoHideSeconds) => invoke<void>('set_bubble_settings', { enabled, autoHideSeconds }),
 };

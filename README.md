@@ -12,7 +12,7 @@ To enable signed releases in a new GitHub repository:
 
 The updater endpoint is set from the repository name by the release workflow. Replacing or losing the signing key breaks updates for previously installed builds.
 
-AlverChat is a local network desktop chat project built with Tauri 2. The desktop app currently provides signed LAN peer discovery, encrypted local message storage, persistent identity, draggable overlay windows, local preferences, and signed GitHub release updates. Secure peer-to-peer message transport is still in progress; discovered peers cannot exchange messages yet.
+AlverChat is a local network desktop chat project built with Tauri 2. The desktop app currently provides signed LAN peer discovery, an interim authenticated encrypted direct-message transport, encrypted local message storage, persistent identity, draggable overlay windows, shared bubble preferences, and signed GitHub release updates. The transport does not yet meet the specified TLS 1.3 WebSocket design, so production releases remain blocked.
 
 ## Development
 
@@ -23,7 +23,7 @@ pnpm dev
 
 Desktop development: `pnpm dev:desktop`. Production UI bundle: `pnpm build`. Rust workspace: `cargo build --workspace`.
 
-Run `pnpm tauri dev` to launch the desktop app. Browser mode is only a UI development shell; it has no peer service and rejects message sends. The desktop UI does not seed sample conversations or claim that unsupported features succeeded. See [docs/PROGRESS.md](docs/PROGRESS.md) and [docs/BLOCKERS.md](docs/BLOCKERS.md) for current capability and release status.
+Browser mode is only a UI development shell; it has no peer service and rejects message sends. The desktop UI does not seed sample conversations or claim that unsupported features succeeded. See [docs/PROGRESS.md](docs/PROGRESS.md) and [docs/BLOCKERS.md](docs/BLOCKERS.md) for current capability and release status.
 
 ## Platform notes
 

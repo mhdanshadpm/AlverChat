@@ -7,6 +7,7 @@ pub mod groups;
 pub mod identity;
 pub mod protocol;
 pub mod storage;
+pub mod transport;
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};

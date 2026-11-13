@@ -4,6 +4,13 @@ use uuid::Uuid;
 use crate::groups::GroupState;
 use crate::{Envelope, Hlc, Message};
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredPeer {
+    pub id: String,
+    pub name: String,
+    pub public_key: [u8; 32],
+}
+
 /// Encrypted local store. The key must come from the platform keychain.
 pub struct Store {
     connection: Connection,
@@ -20,6 +27,7 @@ impl Store {
             .execute_batch(
                 "PRAGMA foreign_keys = ON;
                  CREATE TABLE IF NOT EXISTS peers (id TEXT PRIMARY KEY, public_key BLOB NOT NULL, trusted INTEGER NOT NULL DEFAULT 0);
+                 CREATE TABLE IF NOT EXISTS peer_directory (id TEXT PRIMARY KEY REFERENCES peers(id) ON DELETE CASCADE, display_name TEXT NOT NULL, last_seen_ms INTEGER NOT NULL DEFAULT 0);
                  CREATE TABLE IF NOT EXISTS chats (id TEXT PRIMARY KEY, name TEXT NOT NULL, is_group INTEGER NOT NULL DEFAULT 0);
                  CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, sender TEXT NOT NULL, body TEXT NOT NULL, physical_ms INTEGER NOT NULL, logical INTEGER NOT NULL, tombstone INTEGER NOT NULL DEFAULT 0, FOREIGN KEY(chat_id) REFERENCES chats(id));
                  CREATE INDEX IF NOT EXISTS messages_by_chat_clock ON messages(chat_id, physical_ms, logical); 
@@ -34,7 +42,7 @@ impl Store {
         Ok(Self { connection })
     }
 
-    pub fn save_message(&mut self, message: &Message) -> Result<(), String> {
+    pub fn save_message(&mut self, message: &Message) -> Result<bool, String> {
         let transaction = self.connection.transaction().map_err(|e| e.to_string())?;
         transaction
             .execute(
@@ -56,7 +64,8 @@ impl Store {
                 )
                 .map_err(|e| e.to_string())?;
         }
-        transaction.commit().map_err(|e| e.to_string())
+        transaction.commit().map_err(|e| e.to_string())?;
+        Ok(inserted == 1)
     }
 
     pub fn messages_for_chat(&self, chat_id: &str) -> Result<Vec<Message>, String> {
@@ -102,6 +111,137 @@ impl Store {
             )
             .map(|_| ())
             .map_err(|error| error.to_string())
+    }
+
+    /// Atomically persist an outgoing message and its delivery outbox envelope.
+    pub fn enqueue_message(
+        &mut self,
+        message: &Message,
+        peer_id: &str,
+        envelope: &Envelope<serde_json::Value>,
+    ) -> Result<(), String> {
+        if message.id != envelope.id
+            || message.chat_id != peer_id
+            || envelope.to != peer_id
+            || envelope.kind != "message"
+            || message.body.is_empty()
+            || message.body.len() > 16_384
+        {
+            return Err("outgoing message and transport envelope do not match".into());
+        }
+        let envelope_bytes = serde_json::to_vec(envelope).map_err(|error| error.to_string())?;
+        let transaction = self.connection.transaction().map_err(|e| e.to_string())?;
+        transaction
+            .execute(
+                "INSERT INTO chats(id, name) VALUES (?1, ?1) ON CONFLICT(id) DO NOTHING",
+                params![message.chat_id],
+            )
+            .map_err(|error| error.to_string())?;
+        let inserted = transaction
+            .execute(
+                "INSERT INTO messages(id, chat_id, sender, body, physical_ms, logical, tombstone) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0) ON CONFLICT(id) DO NOTHING",
+                params![message.id.to_string(), message.chat_id, message.sender, message.body, message.clock.physical_ms, message.clock.logical],
+            )
+            .map_err(|error| error.to_string())?;
+        if inserted == 1 {
+            transaction
+                .execute(
+                    "INSERT INTO message_search(message_id, body) VALUES (?1, ?2)",
+                    params![message.id.to_string(), message.body],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        transaction
+            .execute(
+                "INSERT INTO outbox(id, peer_id, envelope) VALUES (?1, ?2, ?3) ON CONFLICT(id) DO NOTHING",
+                params![envelope.id.to_string(), peer_id, envelope_bytes],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())
+    }
+
+    pub fn is_message_pending(&self, id: Uuid) -> Result<bool, String> {
+        self.connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM outbox WHERE id = ?1)",
+                params![id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    /// Pin an authenticated identity to its stable peer ID on first contact.
+    pub fn trust_peer(&mut self, id: &str, public_key: &[u8; 32]) -> Result<(), String> {
+        if crate::peer_id(public_key) != id {
+            return Err("peer ID does not match its public key".into());
+        }
+        self.connection
+            .execute(
+                "INSERT INTO peers(id, public_key, trusted) VALUES (?1, ?2, 1) ON CONFLICT(id) DO NOTHING",
+                params![id, public_key.as_slice()],
+            )
+            .map_err(|error| error.to_string())?;
+        let stored: Vec<u8> = self
+            .connection
+            .query_row(
+                "SELECT public_key FROM peers WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if stored.as_slice() != public_key {
+            return Err("a different public key is already pinned to this peer ID".into());
+        }
+        Ok(())
+    }
+
+    pub fn save_peer(
+        &mut self,
+        id: &str,
+        name: &str,
+        public_key: &[u8; 32],
+        last_seen_ms: u64,
+    ) -> Result<(), String> {
+        if name.trim().is_empty() || name.len() > 128 || name.chars().any(char::is_control) {
+            return Err("peer display name is invalid".into());
+        }
+        self.trust_peer(id, public_key)?;
+        self.connection
+            .execute(
+                "INSERT INTO peer_directory(id, display_name, last_seen_ms) VALUES (?1, ?2, ?3) ON CONFLICT(id) DO UPDATE SET display_name = excluded.display_name, last_seen_ms = excluded.last_seen_ms",
+                params![id, name, last_seen_ms.min(i64::MAX as u64) as i64],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    pub fn known_peers(&self) -> Result<Vec<StoredPeer>, String> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT peers.id, peer_directory.display_name, peers.public_key FROM peer_directory JOIN peers ON peers.id = peer_directory.id ORDER BY peer_directory.display_name COLLATE NOCASE")
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| {
+                let key = row.get::<_, Vec<u8>>(2)?;
+                let public_key = <[u8; 32]>::try_from(key.as_slice()).map_err(|_| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        2,
+                        rusqlite::types::Type::Blob,
+                        Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "peer public key must contain 32 bytes",
+                        )),
+                    )
+                })?;
+                Ok(StoredPeer {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    public_key,
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        rows.map(|row| row.map_err(|error| error.to_string()))
+            .collect()
     }
 
     pub fn pending_outbox(
@@ -454,6 +594,81 @@ mod tests {
         );
         assert!(store.acknowledge_outbox(envelope.id).unwrap());
         assert!(store.pending_outbox("peer").unwrap().is_empty());
+    }
+
+    #[test]
+    fn outgoing_message_and_outbox_are_persisted_together_until_acknowledged() {
+        let identity = crate::identity::Identity::from_secret([31; 32]);
+        let peer_key = crate::identity::Identity::from_secret([32; 32])
+            .verifying_key()
+            .to_bytes();
+        let peer = crate::peer_id(&peer_key);
+        let message = Message {
+            id: Uuid::now_v7(),
+            chat_id: peer.clone(),
+            sender: "local".into(),
+            body: "queued securely".into(),
+            clock: Hlc {
+                physical_ms: 12,
+                logical: 0,
+            },
+            tombstone: false,
+        };
+        let envelope = Envelope {
+            v: crate::PROTOCOL_VERSION,
+            id: message.id,
+            kind: "message".into(),
+            from: identity.peer_id(),
+            to: peer.clone(),
+            hlc: message.clock,
+            payload: serde_json::json!({"text": message.body}),
+        };
+        let mut store = Store::open(":memory:", &[33; 32]).unwrap();
+        store.enqueue_message(&message, &peer, &envelope).unwrap();
+        assert!(store.is_message_pending(message.id).unwrap());
+        assert_eq!(
+            store.messages_for_chat(&peer).unwrap(),
+            vec![message.clone()]
+        );
+        assert_eq!(store.pending_outbox(&peer).unwrap(), vec![envelope.clone()]);
+        assert!(store.acknowledge_outbox(message.id).unwrap());
+        assert!(!store.is_message_pending(message.id).unwrap());
+    }
+
+    #[test]
+    fn peer_identity_is_pinned_and_id_mismatch_is_rejected() {
+        let peer = crate::identity::Identity::from_secret([34; 32]);
+        let key = peer.verifying_key().to_bytes();
+        let mut store = Store::open(":memory:", &[35; 32]).unwrap();
+        store.trust_peer(&peer.peer_id(), &key).unwrap();
+        store.trust_peer(&peer.peer_id(), &key).unwrap();
+        assert!(store.trust_peer("wrong-id", &key).is_err());
+        let other_key = crate::identity::Identity::from_secret([36; 32])
+            .verifying_key()
+            .to_bytes();
+        assert!(store.trust_peer(&peer.peer_id(), &other_key).is_err());
+    }
+
+    #[test]
+    fn known_peers_survive_database_reopen() {
+        let path = std::env::temp_dir().join(format!("alverchat-peers-{}.db", Uuid::now_v7()));
+        let path = path.to_str().unwrap().to_owned();
+        let peer = crate::identity::Identity::from_secret([37; 32]);
+        let expected = StoredPeer {
+            id: peer.peer_id(),
+            name: "LAN colleague".into(),
+            public_key: peer.verifying_key().to_bytes(),
+        };
+        {
+            let mut store = Store::open(&path, &[38; 32]).unwrap();
+            store
+                .save_peer(&expected.id, &expected.name, &expected.public_key, 123)
+                .unwrap();
+        }
+        let store = Store::open(&path, &[38; 32]).unwrap();
+        assert_eq!(store.known_peers().unwrap(), vec![expected]);
+        drop(store);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

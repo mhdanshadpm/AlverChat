@@ -9,7 +9,7 @@ function Avatar({ peer }: { peer: Peer }) {
 
 function useOverlayState() {
   const [bridge, setBridge] = useState<PlatformBridge>(emptyBrowserBridge);
-  const [state, setState] = useState<OverlaySnapshot>({ peers: [], unreadTotal: 0, open: false, dockSide: 'right', snapToEdge: true });
+  const [state, setState] = useState<OverlaySnapshot>({ peers: [], unreadTotal: 0, open: false, dockSide: 'right', snapToEdge: true, bubblesEnabled: true, bubbleAutoHideSeconds: 8 });
   useEffect(() => { let unlisten: (() => void) | undefined; let mounted = true;
     void bridgeForRuntime().then(async next => { if (!mounted) return; setBridge(next); setState(await next.overlaySnapshot());
       unlisten = await listen<OverlaySnapshot>('overlay-state', event => setState(event.payload));
@@ -69,18 +69,10 @@ export function DockWindow() {
   const { bridge, state } = useOverlayState();
   const [draft, setDraft] = useState(''); const [replyId, setReplyId] = useState<string | null>(null);
   const [bubblesExpired, setBubblesExpired] = useState(false);
-  const [bubblesEnabled, setBubblesEnabled] = useState(() => localStorage.getItem('alverchat.preference.enable-message-bubbles') !== 'false');
-  const [bubbleHideDelay, setBubbleHideDelay] = useState(() => Number(localStorage.getItem('alverchat.preference.bubble-auto-hide-delay')) || 8);
+  const bubblesEnabled = state.bubblesEnabled;
+  const bubbleHideDelay = state.bubbleAutoHideSeconds;
   const unread = state.peers.filter(peer => peer.unread).slice(0, 3);
   const notificationKey = unread.map(peer => `${peer.id}:${peer.preview}:${peer.time}`).join('|');
-  useEffect(() => {
-    const refresh = () => {
-      setBubblesEnabled(localStorage.getItem('alverchat.preference.enable-message-bubbles') !== 'false');
-      setBubbleHideDelay(Number(localStorage.getItem('alverchat.preference.bubble-auto-hide-delay')) || 8);
-    };
-    window.addEventListener('storage', refresh);
-    return () => window.removeEventListener('storage', refresh);
-  }, []);
   useEffect(() => {
     setBubblesExpired(false);
     if (!notificationKey || !bubblesEnabled) return;
@@ -97,7 +89,7 @@ export function DockWindow() {
       <div className={`dock-bubbles overlay-hit ${visibleUnread.length ? 'has-bubbles' : ''}`}>{visibleUnread.map(peer => <article className="dock-bubble" key={peer.id}>
         <button className="bubble-open" onClick={() => void bridge.openFullApp(peer.id)}><Avatar peer={peer}/><span className="dock-bubble-copy"><b>{peer.name}</b><small>{peer.preview}</small></span><time>{peer.time}</time></button>
         <button className="bubble-reply" aria-label={`Quick reply to ${peer.name}`} onClick={() => setReplyId(replyId === peer.id ? null : peer.id)}><Reply size={14}/></button>
-        {replyId === peer.id && <form className="quick-reply" onSubmit={event => { event.preventDefault(); if (draft.trim() && peer.online) void bridge.sendMessage(peer.id, draft.trim()).then(() => { setDraft(''); setReplyId(null); }).catch(() => {}); }}><input autoFocus disabled={!peer.online} value={draft} onChange={event => setDraft(event.target.value)} placeholder={peer.online?'Reply...':'Messaging unavailable until secure transport is enabled'}/><button disabled={!peer.online}><Send size={14}/></button></form>}
+        {replyId === peer.id && <form className="quick-reply" onSubmit={event => { event.preventDefault(); if (draft.trim() && peer.online) void bridge.sendMessage(peer.id, draft.trim()).then(() => { setDraft(''); setReplyId(null); }).catch(() => {}); }}><input autoFocus disabled={!peer.online} value={draft} onChange={event => setDraft(event.target.value)} placeholder={peer.online?'Reply...':'Peer unavailable on the local network'}/><button disabled={!peer.online}><Send size={14}/></button></form>}
       </article>)}</div>
       <button {...drag.handlers} className={`floating-dock dock-trigger overlay-hit ${state.unreadTotal ? 'has-unread' : ''} ${drag.dragging?'is-dragging':''}`} onContextMenu={event => { event.preventDefault(); void bridge.openDockMenu(); }} aria-label="Open AlverChat quick chats">{iconPeer && state.unreadTotal ? <Avatar peer={iconPeer}/> : <MessageCircle size={23} fill="currentColor"/>}{state.unreadTotal > 0 && <span>{state.unreadTotal}</span>}</button>
     </div>

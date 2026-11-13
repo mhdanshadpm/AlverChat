@@ -6,15 +6,28 @@ use alver_core::{
     discovery::{MdnsDiscovery, PeerBeacon},
     identity::Identity,
     storage::Store,
+    transport::{initiator_handshake, responder_handshake, RemoteIdentity},
+    Envelope, Hlc, Message, PROTOCOL_VERSION,
 };
 use drag::{Edge, Rect};
 use mdns_sd::{RecvTimeoutError, ServiceEvent};
 use rand_core::{OsRng, RngCore};
 use serde::Serialize;
-use std::{collections::HashMap, fs, path::PathBuf, sync::Mutex};
+use serde_json::Value;
+use std::{
+    collections::{HashMap, HashSet},
+    fs, io,
+    net::{TcpListener, TcpStream, ToSocketAddrs},
+    path::PathBuf,
+    sync::atomic::{AtomicUsize, Ordering},
+    sync::{Arc, Mutex},
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use uuid::Uuid;
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -45,6 +58,7 @@ struct MessageDto {
     kind: String,
     file_name: Option<String>,
     timestamp_ms: u64,
+    delivery_status: String,
 }
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -54,6 +68,8 @@ struct OverlaySnapshot {
     open: bool,
     dock_side: Edge,
     snap_to_edge: bool,
+    bubbles_enabled: bool,
+    bubble_auto_hide_seconds: u8,
 }
 #[derive(Serialize, serde::Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -66,11 +82,26 @@ struct SavedDockPosition {
 #[serde(rename_all = "camelCase")]
 struct OverlayPreferences {
     dock_position: Option<SavedDockPosition>,
+    #[serde(default = "default_true")]
     snap_to_edge: bool,
+    #[serde(default = "default_true")]
+    bubbles_enabled: bool,
+    #[serde(default = "default_bubble_delay")]
+    bubble_auto_hide_seconds: u8,
+}
+fn default_true() -> bool {
+    true
+}
+fn default_bubble_delay() -> u8 {
+    8
 }
 struct OverlayState {
     compact_open: Mutex<bool>,
     peers: Mutex<Vec<PeerDto>>,
+    endpoints: Mutex<HashMap<String, PeerBeacon>>,
+    retrying_peers: Mutex<HashSet<String>>,
+    identity: Arc<Identity>,
+    peer_sessions: Arc<AtomicUsize>,
     store: Mutex<Store>,
     preferences: Mutex<OverlayPreferences>,
     preferences_path: PathBuf,
@@ -80,9 +111,53 @@ struct OverlayState {
     cursor_capture: Mutex<HashMap<String, bool>>,
 }
 
-fn peers() -> Vec<PeerDto> {
-    // Until LAN discovery provides real peers, start with an honest empty list.
-    Vec::new()
+struct PeerSessionGuard(Arc<AtomicUsize>);
+
+impl Drop for PeerSessionGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+fn known_peers(store: &Store) -> Result<Vec<PeerDto>, String> {
+    store
+        .known_peers()?
+        .into_iter()
+        .map(|stored| {
+            let preview = store
+                .messages_for_chat(&stored.id)?
+                .last()
+                .map(|message| {
+                    if message.tombstone {
+                        "This message was deleted".into()
+                    } else {
+                        message.body.clone()
+                    }
+                })
+                .unwrap_or_default();
+            Ok(PeerDto {
+                id: stored.id,
+                name: stored.name.clone(),
+                initials: stored
+                    .name
+                    .split_whitespace()
+                    .filter_map(|part| part.chars().next())
+                    .take(2)
+                    .collect::<String>()
+                    .to_uppercase(),
+                color: "violet".into(),
+                online: false,
+                status: "Offline · last seen on LAN".into(),
+                preview,
+                time: String::new(),
+                unread: None,
+                group: false,
+                typing: false,
+                muted: false,
+                pinned: false,
+            })
+        })
+        .collect()
 }
 fn snapshot(app: &AppHandle) -> OverlaySnapshot {
     let state = app.state::<OverlayState>();
@@ -108,6 +183,16 @@ fn snapshot(app: &AppHandle) -> OverlaySnapshot {
             .lock()
             .map(|p| p.snap_to_edge)
             .unwrap_or(true),
+        bubbles_enabled: state
+            .preferences
+            .lock()
+            .map(|p| p.bubbles_enabled)
+            .unwrap_or(true),
+        bubble_auto_hide_seconds: state
+            .preferences
+            .lock()
+            .map(|p| p.bubble_auto_hide_seconds)
+            .unwrap_or(8),
     }
 }
 fn publish(app: &AppHandle) {
@@ -116,11 +201,25 @@ fn publish(app: &AppHandle) {
 
 fn upsert_discovered_peer(app: &AppHandle, beacon: PeerBeacon) {
     let state = app.state::<OverlayState>();
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    if let Ok(mut store) = state.store.lock() {
+        if let Err(error) =
+            store.save_peer(&beacon.peer_id, &beacon.name, &beacon.public_key, now_ms)
+        {
+            eprintln!("Could not persist discovered peer: {error}");
+        }
+    }
+    let peer_id = beacon.peer_id.clone();
+    if let Ok(mut endpoints) = state.endpoints.lock() {
+        endpoints.insert(peer_id.clone(), beacon.clone());
+    }
     let Ok(mut peers) = state.peers.lock() else {
         return;
     };
-    let peer_id = beacon.peer_id.clone();
-    let peer = PeerDto {
+    let mut peer = PeerDto {
         id: peer_id.clone(),
         name: beacon.name.clone(),
         initials: beacon
@@ -131,8 +230,8 @@ fn upsert_discovered_peer(app: &AppHandle, beacon: PeerBeacon) {
             .collect::<String>()
             .to_uppercase(),
         color: "violet".into(),
-        online: false,
-        status: "Discovered on LAN · messaging unavailable".into(),
+        online: true,
+        status: "Available on LAN · end-to-end encrypted".into(),
         preview: String::new(),
         time: String::new(),
         unread: None,
@@ -142,6 +241,11 @@ fn upsert_discovered_peer(app: &AppHandle, beacon: PeerBeacon) {
         pinned: false,
     };
     if let Some(existing) = peers.iter_mut().find(|peer| peer.id == peer_id) {
+        peer.preview.clone_from(&existing.preview);
+        peer.time.clone_from(&existing.time);
+        peer.unread = existing.unread;
+        peer.muted = existing.muted;
+        peer.pinned = existing.pinned;
         *existing = peer;
     } else {
         peers.push(peer);
@@ -150,11 +254,285 @@ fn upsert_discovered_peer(app: &AppHandle, beacon: PeerBeacon) {
     publish(app);
 }
 
-fn start_peer_discovery(app: AppHandle, identity: Identity) -> Result<(), String> {
+fn start_secure_listener(app: AppHandle, identity: Arc<Identity>) -> Result<u16, String> {
+    let listener = TcpListener::bind(("0.0.0.0", 0)).map_err(|error| error.to_string())?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| error.to_string())?;
+    let port = listener
+        .local_addr()
+        .map_err(|error| error.to_string())?
+        .port();
+    thread::Builder::new()
+        .name("alverchat-secure-listener".into())
+        .spawn(move || loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    let app = app.clone();
+                    let identity = identity.clone();
+                    let state = app.state::<OverlayState>();
+                    let sessions = state.peer_sessions.clone();
+                    if sessions
+                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                            (active < 32).then_some(active + 1)
+                        })
+                        .is_err()
+                    {
+                        drop(stream);
+                        continue;
+                    }
+                    let guard_sessions = sessions.clone();
+                    let spawned = thread::Builder::new()
+                        .name("alverchat-peer-session".into())
+                        .spawn(move || {
+                            let _guard = PeerSessionGuard(guard_sessions);
+                            if let Err(error) = handle_peer_session(app, identity, stream) {
+                                eprintln!("Secure peer session ended: {error}");
+                            }
+                        });
+                    if spawned.is_err() {
+                        sessions.fetch_sub(1, Ordering::AcqRel);
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(50));
+                }
+                Err(error) => {
+                    eprintln!("Secure peer listener stopped: {error}");
+                    break;
+                }
+            }
+        })
+        .map_err(|error| error.to_string())?;
+    Ok(port)
+}
+
+fn handle_peer_session(
+    app: AppHandle,
+    identity: Arc<Identity>,
+    stream: TcpStream,
+) -> Result<(), String> {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .map_err(|error| error.to_string())?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(10)))
+        .map_err(|error| error.to_string())?;
+    let mut session = responder_handshake(stream, &identity)?;
+    let remote = session.remote_identity().clone();
+    if remote.peer_id == identity.peer_id() {
+        return Err("self-connections are not accepted".into());
+    }
+    app.state::<OverlayState>()
+        .store
+        .lock()
+        .map_err(|_| "message store lock poisoned")?
+        .trust_peer(&remote.peer_id, &remote.public_key)?;
+
+    loop {
+        let envelope: Envelope<Value> = session.receive()?;
+        if envelope.v != PROTOCOL_VERSION
+            || envelope.kind != "message"
+            || envelope.from != remote.peer_id
+            || envelope.to != identity.peer_id()
+        {
+            return Err("incoming message envelope is invalid".into());
+        }
+        let body = envelope
+            .payload
+            .get("text")
+            .and_then(Value::as_str)
+            .ok_or("incoming message has no text")?;
+        if body.trim().is_empty() || body.len() > 16_384 {
+            return Err("incoming message text is outside the supported size".into());
+        }
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        if envelope.hlc.physical_ms > now_ms.saturating_add(5 * 60 * 1000) {
+            return Err("incoming message timestamp is too far in the future".into());
+        }
+        let message = Message {
+            id: envelope.id,
+            chat_id: remote.peer_id.clone(),
+            sender: remote.peer_id.clone(),
+            body: body.to_owned(),
+            clock: envelope.hlc,
+            tombstone: false,
+        };
+        let state = app.state::<OverlayState>();
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|_| "message store lock poisoned")?;
+        let is_new = store.save_message(&message)?;
+        drop(store);
+
+        if let Ok(mut peers) = app.state::<OverlayState>().peers.lock() {
+            if let Some(peer) = peers.iter_mut().find(|peer| peer.id == remote.peer_id) {
+                peer.preview = body.to_owned();
+                if is_new {
+                    peer.unread = Some(peer.unread.unwrap_or(0).saturating_add(1));
+                }
+            }
+        }
+        publish(&app);
+        let receipt = Envelope {
+            v: PROTOCOL_VERSION,
+            id: Uuid::now_v7(),
+            kind: "receipt".into(),
+            from: identity.peer_id(),
+            to: remote.peer_id.clone(),
+            hlc: Hlc {
+                physical_ms: now_ms,
+                logical: 0,
+            },
+            payload: serde_json::json!({"message_id": message.id.to_string(), "status":"delivered"}),
+        };
+        session.send(&receipt)?;
+        let _ = app.emit("messages-changed", remote.peer_id.clone());
+    }
+}
+
+fn connect_to_peer(beacon: &PeerBeacon) -> Result<TcpStream, String> {
+    let addresses = (beacon.host.as_str(), beacon.port)
+        .to_socket_addrs()
+        .map_err(|error| format!("Cannot resolve peer address: {error}"))?
+        .collect::<Vec<_>>();
+    if addresses.is_empty() {
+        return Err("Peer address did not resolve on the local network".into());
+    }
+    let mut last_error = None;
+    for address in addresses {
+        match TcpStream::connect_timeout(&address, Duration::from_secs(5)) {
+            Ok(stream) => {
+                stream
+                    .set_nodelay(true)
+                    .map_err(|error| error.to_string())?;
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .map_err(|error| error.to_string())?;
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(10)))
+                    .map_err(|error| error.to_string())?;
+                return Ok(stream);
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(format!(
+        "Cannot connect to peer on the local network: {}",
+        last_error
+            .map(|error| error.to_string())
+            .unwrap_or_else(|| "no usable address".into())
+    ))
+}
+
+fn deliver_envelope(
+    app: &AppHandle,
+    beacon: &PeerBeacon,
+    envelope: &Envelope<Value>,
+) -> Result<(), String> {
+    let state = app.state::<OverlayState>();
+    let stream = connect_to_peer(beacon)?;
+    let expected = RemoteIdentity {
+        peer_id: beacon.peer_id.clone(),
+        public_key: beacon.public_key,
+    };
+    let mut session = initiator_handshake(stream, &state.identity, &expected)?;
+    state
+        .store
+        .lock()
+        .map_err(|_| "message store lock poisoned")?
+        .trust_peer(&expected.peer_id, &expected.public_key)?;
+    session.send(envelope)?;
+    let receipt: Envelope<Value> = session.receive()?;
+    let message_id = envelope.id.to_string();
+    if receipt.v != PROTOCOL_VERSION
+        || receipt.kind != "receipt"
+        || receipt.from != expected.peer_id
+        || receipt.to != state.identity.peer_id()
+        || receipt.payload.get("status").and_then(Value::as_str) != Some("delivered")
+        || receipt.payload.get("message_id").and_then(Value::as_str) != Some(message_id.as_str())
+    {
+        return Err("peer returned an invalid delivery receipt".into());
+    }
+    state
+        .store
+        .lock()
+        .map_err(|_| "message store lock poisoned")?
+        .acknowledge_outbox(envelope.id)?;
+    let _ = app.emit("messages-changed", envelope.to.clone());
+    Ok(())
+}
+
+fn start_outbox_retry(app: AppHandle, beacon: PeerBeacon) {
+    let peer_id = beacon.peer_id.clone();
+    let state = app.state::<OverlayState>();
+    let Ok(mut retrying) = state.retrying_peers.lock() else {
+        return;
+    };
+    if !retrying.insert(peer_id.clone()) {
+        return;
+    }
+    drop(retrying);
+    let cleanup_app = app.clone();
+    let cleanup_peer_id = peer_id.clone();
+    let started = thread::Builder::new()
+        .name("alverchat-outbox-retry".into())
+        .spawn(move || {
+            let mut delay = 1_u64;
+            loop {
+                let pending = app
+                    .state::<OverlayState>()
+                    .store
+                    .lock()
+                    .ok()
+                    .and_then(|store| store.pending_outbox(&peer_id).ok())
+                    .unwrap_or_default();
+                if pending.is_empty() {
+                    break;
+                }
+                let Some(beacon) = app
+                    .state::<OverlayState>()
+                    .endpoints
+                    .lock()
+                    .ok()
+                    .and_then(|endpoints| endpoints.get(&peer_id).cloned())
+                else {
+                    break;
+                };
+                let mut failed = false;
+                for envelope in pending {
+                    if deliver_envelope(&app, &beacon, &envelope).is_err() {
+                        failed = true;
+                        break;
+                    }
+                }
+                if failed {
+                    thread::sleep(Duration::from_secs(delay));
+                    delay = (delay * 2).min(60);
+                } else {
+                    break;
+                }
+            }
+            if let Ok(mut retrying) = app.state::<OverlayState>().retrying_peers.lock() {
+                retrying.remove(&peer_id);
+            }
+        });
+    if started.is_err() {
+        if let Ok(mut retrying) = cleanup_app.state::<OverlayState>().retrying_peers.lock() {
+            retrying.remove(&cleanup_peer_id);
+        }
+    }
+}
+
+fn start_peer_discovery(app: AppHandle, identity: Arc<Identity>, port: u16) -> Result<(), String> {
     let mdns = MdnsDiscovery::new()?;
     let host = format!("alverchat-{}.local.", &identity.peer_id()[..12]);
-    let display_name = "AlverChat user".to_owned();
-    let beacon = PeerBeacon::signed(&identity, display_name, host, 47_987);
+    let display_name = format!("AlverChat {}", &identity.peer_id()[..8]);
+    let beacon = PeerBeacon::signed(&identity, display_name, host, port);
     mdns.publish(&beacon, &[])?;
     let events = mdns.browse()?;
     let self_id = beacon.peer_id.clone();
@@ -172,12 +550,20 @@ fn start_peer_discovery(app: AppHandle, identity: Identity) -> Result<(), String
                     }
                     discovered_services
                         .insert(service.get_fullname().to_owned(), beacon.peer_id.clone());
-                    upsert_discovered_peer(&app, beacon);
+                    upsert_discovered_peer(&app, beacon.clone());
+                    start_outbox_retry(app.clone(), beacon);
                 }
                 Ok(ServiceEvent::ServiceRemoved(fullname, _)) => {
                     if let Some(peer_id) = discovered_services.remove(&fullname) {
+                        if let Ok(mut endpoints) = app.state::<OverlayState>().endpoints.lock() {
+                            endpoints.remove(&peer_id);
+                        }
                         if let Ok(mut peers) = app.state::<OverlayState>().peers.lock() {
-                            peers.retain(|peer| peer.id != peer_id);
+                            if let Some(peer) = peers.iter_mut().find(|peer| peer.id == peer_id) {
+                                peer.online = false;
+                                peer.status =
+                                    "Offline · messages will retry when the peer returns".into();
+                            }
                         }
                         publish(&app);
                     }
@@ -231,18 +617,114 @@ fn list_messages(app: AppHandle, chat_id: String) -> Result<Vec<MessageDto>, Str
                 },
                 file_name: None,
                 timestamp_ms: message.clock.physical_ms,
+                delivery_status: if message.sender == "local"
+                    && store.is_message_pending(message.id).unwrap_or(false)
+                {
+                    "pending".into()
+                } else {
+                    "delivered".into()
+                },
             })
             .collect()
     })
 }
 #[tauri::command]
-fn send_message(chat_id: String, text: String) -> Result<MessageDto, String> {
+async fn send_message(app: AppHandle, chat_id: String, text: String) -> Result<MessageDto, String> {
+    tauri::async_runtime::spawn_blocking(move || send_message_blocking(app, chat_id, text))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn send_message_blocking(
+    app: AppHandle,
+    chat_id: String,
+    text: String,
+) -> Result<MessageDto, String> {
     let text = text.trim();
     if chat_id.trim().is_empty() || text.is_empty() || text.len() > 16_384 {
         return Err("Message must have a chat and contain 1–16384 bytes.".into());
     }
-    let _ = (chat_id, text);
-    Err("Messaging is unavailable until secure peer transport is implemented.".into())
+    let state = app.state::<OverlayState>();
+    let beacon = state
+        .endpoints
+        .lock()
+        .map_err(|_| "peer endpoint lock poisoned")?
+        .get(&chat_id)
+        .cloned()
+        .ok_or_else(|| "This peer is no longer available on the local network.".to_owned())?;
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let message = Message {
+        id: Uuid::now_v7(),
+        chat_id: chat_id.clone(),
+        sender: "local".into(),
+        body: text.to_owned(),
+        clock: Hlc {
+            physical_ms: now_ms,
+            logical: 0,
+        },
+        tombstone: false,
+    };
+    let envelope = Envelope {
+        v: PROTOCOL_VERSION,
+        id: message.id,
+        kind: "message".into(),
+        from: state.identity.peer_id(),
+        to: chat_id.clone(),
+        hlc: message.clock,
+        payload: serde_json::json!({"text": text}),
+    };
+    state
+        .store
+        .lock()
+        .map_err(|_| "message store lock poisoned")?
+        .enqueue_message(&message, &chat_id, &envelope)?;
+
+    let pending = state
+        .store
+        .lock()
+        .map_err(|_| "message store lock poisoned")?
+        .pending_outbox(&chat_id)?;
+    let mut delivery_failed = false;
+    for queued in pending {
+        if deliver_envelope(&app, &beacon, &queued).is_err() {
+            delivery_failed = true;
+            break;
+        }
+    }
+    if delivery_failed {
+        start_outbox_retry(app.clone(), beacon);
+    }
+    let delivery_status = if state
+        .store
+        .lock()
+        .map_err(|_| "message store lock poisoned")?
+        .is_message_pending(message.id)?
+    {
+        "pending"
+    } else {
+        "delivered"
+    };
+    if let Ok(mut peers) = state.peers.lock() {
+        if let Some(peer) = peers.iter_mut().find(|peer| peer.id == chat_id) {
+            peer.preview = message.body.clone();
+        }
+    }
+    publish(&app);
+    Ok(MessageDto {
+        id: message.id.to_string(),
+        sender: "local".into(),
+        text: message.body,
+        time: String::new(),
+        mine: true,
+        read: false,
+        kind: "text".into(),
+        file_name: None,
+        timestamp_ms: message.clock.physical_ms,
+        delivery_status: delivery_status.into(),
+    })
 }
 #[tauri::command]
 fn overlay_snapshot(app: AppHandle) -> OverlaySnapshot {
@@ -396,28 +878,59 @@ fn reset_overlay_position(app: AppHandle) -> Result<(), String> {
         };
         if let Ok(mut prefs) = app.state::<OverlayState>().preferences.lock() {
             prefs.dock_position = Some(position);
-            persist_preferences(&app, &prefs);
+            let _ = persist_preferences(&app, &prefs);
         }
     }
     publish(&app);
     Ok(())
 }
 #[tauri::command]
-fn set_snap_to_edge(app: AppHandle, enabled: bool) {
-    if let Ok(mut prefs) = app.state::<OverlayState>().preferences.lock() {
-        prefs.snap_to_edge = enabled;
-        persist_preferences(&app, &prefs);
+fn set_snap_to_edge(app: AppHandle, enabled: bool) -> Result<(), String> {
+    let state = app.state::<OverlayState>();
+    let mut prefs = state
+        .preferences
+        .lock()
+        .map_err(|_| "preferences lock poisoned")?;
+    let old = prefs.clone();
+    prefs.snap_to_edge = enabled;
+    if let Err(error) = persist_preferences(&app, &prefs) {
+        *prefs = old;
+        return Err(error);
     }
+    drop(prefs);
     publish(&app);
+    Ok(())
 }
 
-fn persist_preferences(app: &AppHandle, prefs: &OverlayPreferences) {
-    if let Some(state) = app.try_state::<OverlayState>() {
-        let _ = fs::write(
-            &state.preferences_path,
-            serde_json::to_vec_pretty(prefs).unwrap_or_default(),
-        );
+#[tauri::command]
+fn set_bubble_settings(app: AppHandle, enabled: bool, auto_hide_seconds: u8) -> Result<(), String> {
+    if !(1..=60).contains(&auto_hide_seconds) {
+        return Err("Bubble auto-hide delay must be between 1 and 60 seconds.".into());
     }
+    let state = app.state::<OverlayState>();
+    let mut prefs = state
+        .preferences
+        .lock()
+        .map_err(|_| "preferences lock poisoned")?;
+    let old = prefs.clone();
+    prefs.bubbles_enabled = enabled;
+    prefs.bubble_auto_hide_seconds = auto_hide_seconds;
+    if let Err(error) = persist_preferences(&app, &prefs) {
+        *prefs = old;
+        return Err(error);
+    }
+    drop(prefs);
+    publish(&app);
+    Ok(())
+}
+
+fn persist_preferences(app: &AppHandle, prefs: &OverlayPreferences) -> Result<(), String> {
+    let state = app
+        .try_state::<OverlayState>()
+        .ok_or("overlay state is unavailable")?;
+    let bytes = serde_json::to_vec_pretty(prefs).map_err(|error| error.to_string())?;
+    fs::write(&state.preferences_path, bytes)
+        .map_err(|error| format!("could not save preferences: {error}"))
 }
 
 fn set_window_capture(
@@ -665,7 +1178,7 @@ fn save_and_snap_dock(
     };
     if let Ok(mut prefs) = app.state::<OverlayState>().preferences.lock() {
         prefs.dock_position = Some(saved);
-        persist_preferences(app, &prefs);
+        let _ = persist_preferences(app, &prefs);
     }
     if let Some(compact) = app.get_webview_window("compact") {
         if app
@@ -718,7 +1231,7 @@ fn update_bubble_side(app: &AppHandle, dock: &WebviewWindow) -> Result<(), Strin
         };
         if let Ok(mut prefs) = app.state::<OverlayState>().preferences.lock() {
             prefs.dock_position = Some(saved);
-            persist_preferences(app, &prefs);
+            let _ = persist_preferences(app, &prefs);
         }
         publish(app);
     }
@@ -1102,11 +1615,19 @@ fn main() {
                 .unwrap_or(OverlayPreferences {
                     dock_position: None,
                     snap_to_edge: true,
+                    bubbles_enabled: true,
+                    bubble_auto_hide_seconds: 8,
                 });
             let store = open_message_store(app.handle()).map_err(std::io::Error::other)?;
+            let initial_peers = known_peers(&store).map_err(std::io::Error::other)?;
+            let identity = Arc::new(identity_key().map_err(std::io::Error::other)?);
             app.manage(OverlayState {
                 compact_open: Mutex::new(false),
-                peers: Mutex::new(peers()),
+                peers: Mutex::new(initial_peers),
+                endpoints: Mutex::new(HashMap::new()),
+                retrying_peers: Mutex::new(HashSet::new()),
+                identity: identity.clone(),
+                peer_sessions: Arc::new(AtomicUsize::new(0)),
                 store: Mutex::new(store),
                 preferences: Mutex::new(preferences),
                 preferences_path,
@@ -1115,9 +1636,9 @@ fn main() {
                 compact_detached: Mutex::new(false),
                 cursor_capture: Mutex::new(HashMap::new()),
             });
-            match identity_key()
-                .and_then(|identity| start_peer_discovery(app.handle().clone(), identity))
-            {
+            let transport = start_secure_listener(app.handle().clone(), identity.clone())
+                .and_then(|port| start_peer_discovery(app.handle().clone(), identity, port));
+            match transport {
                 Ok(()) => {}
                 Err(error) => eprintln!("LAN discovery is unavailable: {error}"),
             }
@@ -1214,6 +1735,7 @@ fn main() {
             end_overlay_drag,
             reset_overlay_position,
             set_snap_to_edge,
+            set_bubble_settings,
             resize_dock,
             open_dock_menu,
             hide_menu,

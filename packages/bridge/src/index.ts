@@ -1,7 +1,7 @@
 export const APP_NAME = "AlverChat";
 export type Peer = { id:string; name:string; initials:string; color:string; online:boolean; status:string; preview:string; time:string; unread?:number; group?:boolean; typing?:boolean; muted?:boolean; pinned?:boolean };
-export type ChatMessage = { id:string; sender:string; text:string; time:string; timestampMs?:number; mine?:boolean; read?:boolean; kind?:'text'|'file'|'event'|'deleted'; fileName?:string; edited?:boolean; replyTo?:string };
-export type OverlaySnapshot = { peers:Peer[]; unreadTotal:number; open:boolean; dockSide:'left'|'right'; snapToEdge:boolean };
+export type ChatMessage = { id:string; sender:string; text:string; time:string; timestampMs?:number; mine?:boolean; read?:boolean; deliveryStatus?:'pending'|'delivered'; kind?:'text'|'file'|'event'|'deleted'; fileName?:string; edited?:boolean; replyTo?:string };
+export type OverlaySnapshot = { peers:Peer[]; unreadTotal:number; open:boolean; dockSide:'left'|'right'; snapToEdge:boolean; bubblesEnabled:boolean; bubbleAutoHideSeconds:number };
 export interface PlatformBridge {
   listPeers(): Promise<Peer[]>;
   listMessages(chatId:string): Promise<ChatMessage[]>;
@@ -21,6 +21,7 @@ export interface PlatformBridge {
   quit(): Promise<void>;
   resetOverlayPosition(): Promise<void>;
   setSnapToEdge(enabled:boolean): Promise<void>;
+  setBubbleSettings(enabled:boolean,autoHideSeconds:number): Promise<void>;
 }
 
 const noBrowserPeers:Peer[] = [];
@@ -28,7 +29,7 @@ export const emptyBrowserBridge:PlatformBridge = {
  async listPeers(){return noBrowserPeers},
  async listMessages(){return []},
  async sendMessage(){throw new Error('Messaging is unavailable outside the AlverChat desktop app.')},
- async overlaySnapshot(){return {peers:noBrowserPeers,unreadTotal:0,open:false,dockSide:'right',snapToEdge:true}}
+ async overlaySnapshot(){return {peers:noBrowserPeers,unreadTotal:0,open:false,dockSide:'right',snapToEdge:true,bubblesEnabled:true,bubbleAutoHideSeconds:8}}
  ,async toggleCompact(){/* browser preview */}
  ,async hideCompact(){/* browser preview */}
  ,async openFullApp(){/* browser preview */}
@@ -43,6 +44,7 @@ export const emptyBrowserBridge:PlatformBridge = {
  ,async quit(){/* browser preview */}
  ,async resetOverlayPosition(){/* browser preview */}
  ,async setSnapToEdge(){/* browser preview */}
+ ,async setBubbleSettings(){/* browser preview */}
 };
 
 export async function bridgeForRuntime():Promise<PlatformBridge>{
