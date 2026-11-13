@@ -12,6 +12,7 @@ packages/ui  ->  packages/bridge (PlatformBridge)  ->  apps/desktop (Tauri)
 
 - Versioned protocol envelope, hybrid logical clock, peer-key fingerprint/signatures, idempotent in-memory ledger, sender-only tombstones.
 - Ed25519 install identity primitive, Argon2id LAN key derivation, XChaCha20-Poly1305 payload helper.
+- Admin-signed group roster state with canonical member ordering, epoch checks, immutable Everyone-group roster, and atomic persistence in the SQLCipher store.
 - SQLCipher-backed SQLite open/migration with peers, chats, messages, FTS and an idempotent persistent outbox API.
 - mDNS `_alverchat._tcp.local.` publication/browse and a signed, size-capped UDP broadcast beacon fallback.
 - Tauri 2 main window, CSP and bridge commands. The native command surface currently returns no discovered peers; live transport has not been connected to it.
