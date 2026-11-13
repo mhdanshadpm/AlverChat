@@ -8,7 +8,7 @@ Updated 2026-11-13 (Asia/Kolkata). The product is still incomplete and should no
 - Removes seeded demo peers, messages, fabricated call history, and fake media details. Empty states use live peer/message counts. Unsupported messaging, calls, group creation, and settings are disabled or report unavailable.
 - Ed25519 identity persisted through the system credential store; signed mDNS service advertisements are verified before showing discovered peers.
 - SQLCipher message database with its key stored in the OS credential store, ordered local history, and persistent core outbox primitives.
-- Profile/theme/preferences persistence on this device. Bubble auto-hide preference and dock snapping are connected to desktop behavior.
+- Profile/theme/preferences persistence on this device. Bubble auto-hide and enable preferences now refresh in the overlay window when changed; dock snapping is connected to native behavior.
 - Tauri signed updater configured for GitHub Releases. The About page can check for an update, ask before install, download it, and relaunch. A GitHub Actions release workflow builds Windows x64 and Apple Silicon macOS artifacts on `v*` tags.
 - Public repository: https://github.com/mhdanshadpm/AlverChat. The private updater signing key is stored in GitHub Actions secrets; only its public key is committed.
 
@@ -16,7 +16,7 @@ Updated 2026-11-13 (Asia/Kolkata). The product is still incomplete and should no
 
 - Signed discovery currently does not have an active transport listener. Messaging is explicitly unavailable; there is no TLS/WebSocket, TOFU trust store, peer heartbeat, reconnect, send/receive, or outbox delivery integration.
 - Groups, file transfer, receipts, message synchronization, calls/WebRTC, screen sharing, incoming call UI, profile/avatar sync, announcement sync, backup/export/restore, and most notification/call/privacy settings are not implemented.
-- Windows/macOS hosted CI has not yet produced an observed run. Native window behavior has not been visually validated in this session; the computer-use bridge returned `noWindowsAvailable`.
+- Windows/macOS hosted CI run 43389740873 is in progress. Native window behavior has not been visually validated in this session; the computer-use bridge returned `noWindowsAvailable`.
 - macOS notarization and Windows/macOS code signing certificates are not configured. Release installers will require platform trust setup before broad public distribution.
 
 ## Local validation

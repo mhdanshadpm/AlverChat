@@ -28,7 +28,7 @@ const messages:Record<string,ChatMessage[]> = {};
 export const mockBridge:PlatformBridge = {
  async listPeers(){return peers},
  async listMessages(id){return messages[id] ?? []},
- async sendMessage(id,text){const msg={id:crypto.randomUUID(),sender:'You',text,time:new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit'}),timestampMs:Date.now(),mine:true,read:false} satisfies ChatMessage; (messages[id]??=[]).push(msg);return msg},
+ async sendMessage(){throw new Error('Messaging is unavailable outside the AlverChat desktop app.')},
  async overlaySnapshot(){return {peers,unreadTotal:peers.reduce((sum,p)=>sum+(p.unread??0),0),open:false,dockSide:'right',snapToEdge:true}}
  ,async toggleCompact(){/* browser preview */}
  ,async hideCompact(){/* browser preview */}

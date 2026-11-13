@@ -69,16 +69,25 @@ export function DockWindow() {
   const { bridge, state } = useOverlayState();
   const [draft, setDraft] = useState(''); const [replyId, setReplyId] = useState<string | null>(null);
   const [bubblesExpired, setBubblesExpired] = useState(false);
+  const [bubblesEnabled, setBubblesEnabled] = useState(() => localStorage.getItem('alverchat.preference.enable-message-bubbles') !== 'false');
+  const [bubbleHideDelay, setBubbleHideDelay] = useState(() => Number(localStorage.getItem('alverchat.preference.bubble-auto-hide-delay')) || 8);
   const unread = state.peers.filter(peer => peer.unread).slice(0, 3);
   const notificationKey = unread.map(peer => `${peer.id}:${peer.preview}:${peer.time}`).join('|');
   useEffect(() => {
+    const refresh = () => {
+      setBubblesEnabled(localStorage.getItem('alverchat.preference.enable-message-bubbles') !== 'false');
+      setBubbleHideDelay(Number(localStorage.getItem('alverchat.preference.bubble-auto-hide-delay')) || 8);
+    };
+    window.addEventListener('storage', refresh);
+    return () => window.removeEventListener('storage', refresh);
+  }, []);
+  useEffect(() => {
     setBubblesExpired(false);
-    if (!notificationKey || localStorage.getItem('alverchat.preference.enable-message-bubbles') === 'false') return;
-    const seconds = Number(localStorage.getItem('alverchat.preference.bubble-auto-hide-delay')) || 8;
-    const timer = window.setTimeout(() => setBubblesExpired(true), seconds * 1000);
+    if (!notificationKey || !bubblesEnabled) return;
+    const timer = window.setTimeout(() => setBubblesExpired(true), bubbleHideDelay * 1000);
     return () => window.clearTimeout(timer);
-  }, [notificationKey]);
-  const visibleUnread = bubblesExpired || localStorage.getItem('alverchat.preference.enable-message-bubbles') === 'false' ? [] : unread;
+  }, [notificationKey, bubblesEnabled, bubbleHideDelay]);
+  const visibleUnread = bubblesExpired || !bubblesEnabled ? [] : unread;
   useEffect(() => { void bridge.resizeDock(visibleUnread.length > 0); }, [bridge, visibleUnread.length]);
   const drag=useNativeDrag(bridge,()=>void bridge.toggleCompact());
   const iconPeer = unread[0] ?? state.peers[0];
