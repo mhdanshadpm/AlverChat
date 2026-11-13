@@ -1,0 +1,10 @@
+node_modules
+dist
+target
+.env
+.DS_Store
+apps/desktop/src-tauri/target
+*.log
+
+*.tsbuildinfo
+.dev-peers/

@@ -1,0 +1,20 @@
+[package]
+name = "alver-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+blake3.workspace = true
+tracing.workspace = true
+ed25519-dalek.workspace = true
+rand_core.workspace = true
+argon2.workspace = true
+chacha20poly1305.workspace = true
+rusqlite.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

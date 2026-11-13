@@ -1,0 +1,122 @@
+{
+  "AlverChat_LAN_Interface_Design_Showcase": [
+    "#EAECFC",
+    "#EAECFC",
+    "#EAECFC",
+    "#E5E2F5",
+    "#E5E2F5",
+    "#E5E2F5",
+    "#E5E2F5",
+    "#E5E2F5"
+  ],
+  "AlverChat_LAN_Setup_Flow": [
+    "#ECEAFB",
+    "#ECEAFB",
+    "#EEEFFB",
+    "#ECEAFB",
+    "#ECEAFB",
+    "#ECEAFB",
+    "#ECEAFB",
+    "#ECEAFB"
+  ],
+  "AlverChat_Settings_Design_System": [
+    "#EBEDFB",
+    "#EBEDFB",
+    "#EBEDFB",
+    "#EBEDFB",
+    "#EBEDFB",
+    "#EBEDFB",
+    "#EBEDFB",
+    "#EBEDFB"
+  ],
+  "AlverChat_Voice_and_Video_Calling_UI_Poster": [
+    "#EEECFC",
+    "#EEECFC",
+    "#EEECFC",
+    "#EEECFC",
+    "#C9CBE7",
+    "#C9CBE7",
+    "#C9CBE7",
+    "#EEECFC"
+  ],
+  "LAN_Chat_Context_Menu_UI_Showcase": [
+    "#EEEFFB",
+    "#EEEFFB",
+    "#EEEFFB",
+    "#EEEFFB",
+    "#F3F3FC",
+    "#E8E8F8",
+    "#D8D8E9",
+    "#E8E8F8"
+  ],
+  "LAN_Chat_Floating_Bubble_UX_Guide": [
+    "#E9EBFB",
+    "#E9EBFB",
+    "#E9EBFB",
+    "#E9EBFB",
+    "#E9EBFB",
+    "#E9EBFB",
+    "#E9EBFB",
+    "#F0F3FE"
+  ],
+  "LAN_Chat_Floating_Icon_States": [
+    "#EFF3FA",
+    "#EFF3FA",
+    "#EFF3FA",
+    "#EFF3FA",
+    "#EFF3FA",
+    "#EFF3FA",
+    "#FAFBFE",
+    "#FAFBFE"
+  ],
+  "LAN_Chat_Group_Flow_Design_Board": [
+    "#EBF0FA",
+    "#EBF0FA",
+    "#EBF0FA",
+    "#EBF0FA",
+    "#EBF0FA",
+    "#EBF0FA",
+    "#EBF0FA",
+    "#F1F5FD"
+  ],
+  "LAN_Chat_Light_and_Dark_UI_Showcase": [
+    "#F0F3FC",
+    "#F0F3FC",
+    "#F0F3FC",
+    "#F0F3FC",
+    "#F0F3FC",
+    "#F0F3FC",
+    "#F0F3FC",
+    "#F0F3FC"
+  ],
+  "LAN_Chat_Profile___Avatar_Showcase": [
+    "#F4F5FE",
+    "#F4F5FE",
+    "#F4F5FE",
+    "#F4F5FE",
+    "#E9E9FA",
+    "#D6DCED",
+    "#E9E9FA",
+    "#F4F5FE"
+  ],
+  "LAN_Chat_UI_Showcase": [
+    "#F7F8FE",
+    "#F4F5FD",
+    "#F2F4FD",
+    "#F4F5FD",
+    "#F7F8FE",
+    "#F4F5FD",
+    "#F0F2FC",
+    "#F2F4FD"
+  ],
+  "LAN_Chat_UI_Themes_and_States": [
+    "#F9FAFE",
+    "#F9FAFE",
+    "#F9FAFE",
+    "#F9FAFE",
+    "#F9FAFE",
+    "#F9FAFE",
+    "#F9FAFE",
+    "#F9FAFE"
+  ]
+}
