@@ -6,7 +6,6 @@ export const tauriBridge: PlatformBridge = {
   listPeers: () => invoke<Peer[]>('list_peers'),
   listMessages: (chatId) => invoke<ChatMessage[]>('list_messages', { chatId }),
   sendMessage: (chatId, text) => invoke<ChatMessage>('send_message', { chatId, text }),
-  setTheme: (theme) => invoke<void>('set_theme', { theme }),
   overlaySnapshot: () => invoke<OverlaySnapshot>('overlay_snapshot'),
   toggleCompact: () => invoke<void>('toggle_compact'),
   hideCompact: () => invoke<void>('hide_compact'),

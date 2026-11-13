@@ -13,6 +13,22 @@ serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
 alver-core = { path = "../../../crates/alver-core" }
+rand_core.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies.keyring]
+version = "3.6.3"
+default-features = false
+features = ["apple-native"]
+
+[target.'cfg(target_os = "windows")'.dependencies.keyring]
+version = "3.6.3"
+default-features = false
+features = ["windows-native"]
+
+[target.'cfg(target_os = "linux")'.dependencies.keyring]
+version = "3.6.3"
+default-features = false
+features = ["linux-native-sync-persistent", "crypto-rust", "vendored"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc = "0.2"

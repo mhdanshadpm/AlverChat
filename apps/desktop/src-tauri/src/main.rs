@@ -2,9 +2,17 @@
 
 mod drag;
 
+use alver_core::{storage::Store, Hlc, Message};
 use drag::{Edge, Rect};
+use rand_core::{OsRng, RngCore};
 use serde::Serialize;
-use std::{collections::HashMap, fs, path::PathBuf, sync::Mutex};
+use std::{
+    collections::HashMap,
+    fs,
+    path::PathBuf,
+    sync::Mutex,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
@@ -38,6 +46,7 @@ struct MessageDto {
     read: bool,
     kind: String,
     file_name: Option<String>,
+    timestamp_ms: u64,
 }
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -64,7 +73,7 @@ struct OverlayPreferences {
 struct OverlayState {
     compact_open: Mutex<bool>,
     peers: Mutex<Vec<PeerDto>>,
-    messages: Mutex<HashMap<String, Vec<MessageDto>>>,
+    store: Mutex<Store>,
     preferences: Mutex<OverlayPreferences>,
     preferences_path: PathBuf,
     active_drag: Mutex<Option<String>>,
@@ -120,34 +129,76 @@ fn list_peers(app: AppHandle) -> Vec<PeerDto> {
         .unwrap_or_default()
 }
 #[tauri::command]
-fn list_messages(app: AppHandle, chat_id: String) -> Vec<MessageDto> {
-    app.state::<OverlayState>()
-        .messages
+fn list_messages(app: AppHandle, chat_id: String) -> Result<Vec<MessageDto>, String> {
+    let state = app.state::<OverlayState>();
+    let store = state
+        .store
         .lock()
-        .ok()
-        .and_then(|messages| messages.get(&chat_id).cloned())
-        .unwrap_or_default()
+        .map_err(|_| "message store lock poisoned")?;
+    store.messages_for_chat(&chat_id).map(|messages| {
+        messages
+            .into_iter()
+            .map(|message| MessageDto {
+                id: message.id.to_string(),
+                sender: message.sender.clone(),
+                text: if message.tombstone {
+                    "This message was deleted".into()
+                } else {
+                    message.body
+                },
+                time: "".into(),
+                mine: message.sender == "local",
+                read: false,
+                kind: if message.tombstone {
+                    "deleted".into()
+                } else {
+                    "text".into()
+                },
+                file_name: None,
+                timestamp_ms: message.clock.physical_ms,
+            })
+            .collect()
+    })
 }
 #[tauri::command]
-fn send_message(app: AppHandle, chat_id: String, text: String) -> MessageDto {
+fn send_message(app: AppHandle, chat_id: String, text: String) -> Result<MessageDto, String> {
+    let text = text.trim();
+    if chat_id.trim().is_empty() || text.is_empty() || text.len() > 16_384 {
+        return Err("Message must have a chat and contain 1–16384 bytes.".into());
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_millis() as u64;
     let msg = MessageDto {
         id: Uuid::now_v7().to_string(),
-        sender: "You".into(),
-        text,
-        time: "Now".into(),
+        sender: "local".into(),
+        text: text.into(),
+        time: String::new(),
         mine: true,
         read: false,
         kind: "text".into(),
         file_name: None,
+        timestamp_ms: now,
     };
-    if let Ok(mut messages) = app.state::<OverlayState>().messages.lock() {
-        messages.entry(chat_id).or_default().push(msg.clone());
-    }
+    app.state::<OverlayState>()
+        .store
+        .lock()
+        .map_err(|_| "message store lock poisoned")?
+        .save_message(&Message {
+            id: Uuid::parse_str(&msg.id).map_err(|error| error.to_string())?,
+            chat_id,
+            sender: "local".into(),
+            body: text.into(),
+            clock: Hlc {
+                physical_ms: now,
+                logical: 0,
+            },
+            tombstone: false,
+        })?;
     publish(&app);
-    msg
+    Ok(msg)
 }
-#[tauri::command]
-fn set_theme(_theme: String) {}
 #[tauri::command]
 fn overlay_snapshot(app: AppHandle) -> OverlaySnapshot {
     snapshot(&app)
@@ -937,6 +988,39 @@ fn set_native_overlay_level(window: &WebviewWindow) {
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn set_native_overlay_level(_window: &WebviewWindow) {}
 
+fn database_key() -> Result<[u8; 32], String> {
+    let entry = keyring::Entry::new("AlverChat", "database-encryption-key")
+        .map_err(|error| format!("Cannot access the system credential store: {error}"))?;
+    let secret = match entry.get_secret() {
+        Ok(secret) => secret,
+        Err(keyring::Error::NoEntry) => {
+            let mut secret = [0u8; 32];
+            OsRng.fill_bytes(&mut secret);
+            entry
+                .set_secret(&secret)
+                .map_err(|error| format!("Cannot save the database key securely: {error}"))?;
+            secret.to_vec()
+        }
+        Err(error) => return Err(format!("Cannot read the database key securely: {error}")),
+    };
+    secret
+        .try_into()
+        .map_err(|_| "The saved database key has an invalid length.".into())
+}
+
+fn open_message_store(app: &AppHandle) -> Result<Store, String> {
+    let directory = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let path = directory.join("messages.db");
+    let path = path
+        .to_str()
+        .ok_or("The app data path is not valid UTF-8")?;
+    Store::open(path, &database_key()?)
+}
+
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
@@ -951,10 +1035,11 @@ fn main() {
                     dock_position: None,
                     snap_to_edge: true,
                 });
+            let store = open_message_store(app.handle()).map_err(std::io::Error::other)?;
             app.manage(OverlayState {
                 compact_open: Mutex::new(false),
                 peers: Mutex::new(peers()),
-                messages: Mutex::new(HashMap::new()),
+                store: Mutex::new(store),
                 preferences: Mutex::new(preferences),
                 preferences_path,
                 active_drag: Mutex::new(None),
@@ -1044,7 +1129,6 @@ fn main() {
             list_peers,
             list_messages,
             send_message,
-            set_theme,
             overlay_snapshot,
             toggle_compact,
             hide_compact,

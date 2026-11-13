@@ -59,6 +59,36 @@ impl Store {
         transaction.commit().map_err(|e| e.to_string())
     }
 
+    pub fn messages_for_chat(&self, chat_id: &str) -> Result<Vec<Message>, String> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, chat_id, sender, body, physical_ms, logical, tombstone FROM messages WHERE chat_id = ?1 ORDER BY physical_ms, logical, id",
+        ).map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(params![chat_id], |row| {
+                let id = row.get::<_, String>(0)?;
+                Ok(Message {
+                    id: Uuid::parse_str(&id).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?,
+                    chat_id: row.get(1)?,
+                    sender: row.get(2)?,
+                    body: row.get(3)?,
+                    clock: Hlc {
+                        physical_ms: row.get::<_, i64>(4)? as u64,
+                        logical: row.get::<_, i64>(5)? as u32,
+                    },
+                    tombstone: row.get::<_, i64>(6)? != 0,
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        rows.map(|row| row.map_err(|error| error.to_string()))
+            .collect()
+    }
+
     pub fn enqueue(
         &mut self,
         peer_id: &str,
@@ -326,6 +356,81 @@ mod tests {
         };
         store.save_message(&message).unwrap();
         assert_eq!(store.get_message(message.id).unwrap(), Some(message));
+    }
+
+    #[test]
+    fn chat_history_is_ordered_and_scoped_to_the_requested_chat() {
+        let mut store = Store::open(":memory:", &[10; 32]).unwrap();
+        let later = Message {
+            id: Uuid::now_v7(),
+            chat_id: "peer-a".into(),
+            sender: "local".into(),
+            body: "later".into(),
+            clock: Hlc {
+                physical_ms: 20,
+                logical: 0,
+            },
+            tombstone: false,
+        };
+        let earlier = Message {
+            id: Uuid::now_v7(),
+            chat_id: "peer-a".into(),
+            sender: "peer-a".into(),
+            body: "earlier".into(),
+            clock: Hlc {
+                physical_ms: 10,
+                logical: 0,
+            },
+            tombstone: false,
+        };
+        let other_chat = Message {
+            id: Uuid::now_v7(),
+            chat_id: "peer-b".into(),
+            sender: "peer-b".into(),
+            body: "other".into(),
+            clock: Hlc {
+                physical_ms: 15,
+                logical: 0,
+            },
+            tombstone: false,
+        };
+        store.save_message(&later).unwrap();
+        store.save_message(&other_chat).unwrap();
+        store.save_message(&earlier).unwrap();
+        assert_eq!(
+            store.messages_for_chat("peer-a").unwrap(),
+            vec![earlier, later]
+        );
+        assert!(store.messages_for_chat("missing").unwrap().is_empty());
+    }
+
+    #[test]
+    fn encrypted_messages_survive_reopening_the_database() {
+        let path = std::env::temp_dir().join(format!("alverchat-store-{}.db", Uuid::now_v7()));
+        let path = path.to_str().unwrap().to_owned();
+        let key = [12; 32];
+        let message = Message {
+            id: Uuid::now_v7(),
+            chat_id: "peer-persisted".into(),
+            sender: "local".into(),
+            body: "durable message".into(),
+            clock: Hlc {
+                physical_ms: 99,
+                logical: 2,
+            },
+            tombstone: false,
+        };
+        {
+            let mut store = Store::open(&path, &key).unwrap();
+            store.save_message(&message).unwrap();
+        }
+        let store = Store::open(&path, &key).unwrap();
+        assert_eq!(
+            store.messages_for_chat("peer-persisted").unwrap(),
+            vec![message]
+        );
+        drop(store);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

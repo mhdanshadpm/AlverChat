@@ -18,9 +18,10 @@ packages/ui  ->  packages/bridge (PlatformBridge)  ->  apps/desktop (Tauri)
 - File receive primitive validates peer-supplied names and size, bounds chunk size/offsets, writes under an internal transfer ID, and checks BLAKE3 before finalizing.
 - Encrypted backup container primitive uses a fresh Argon2id salt and XChaCha20-Poly1305 nonce; it accepts opaque bytes and is not yet wired to database/avatar export.
 - SQLCipher-backed SQLite open/migration with peers, chats, messages, FTS and an idempotent persistent outbox API.
+- Desktop opens the SQLCipher message store under the app data directory and obtains its database key through the platform credential store; message history is read in chat-clock order and survives restart.
 - mDNS `_alverchat._tcp.local.` publication/browse and a signed, size-capped UDP broadcast beacon fallback.
 - Tauri 2 main window, CSP and bridge commands. The native command surface currently returns no discovered peers; live transport has not been connected to it.
 
 ## Not connected yet
 
-No TLS WebSocket transport, peer trust persistence, OS keychain storage, automatic outbox replay, or WebRTC session is active in this build. Native startup and browser development now use empty peer/message lists. Chat delivery, discovery, calls, and trusted identity are unavailable until their transport and secure storage integration is completed. The current in-memory desktop message state is not durable and must not be treated as a production security boundary.
+No TLS WebSocket transport, peer trust persistence, automatic outbox replay, or WebRTC session is active in this build. Native startup and browser development use empty peer/message lists. Chat delivery, discovery, calls, and trusted identity are unavailable until their transport integration is completed. Local message persistence is encrypted with a key from the OS credential store; cross-platform keychain behavior still needs release-platform validation.
