@@ -13,3 +13,5 @@ Updated 2026-11-13 10:52 (Asia/Kolkata).
 - [ ] Phase 9 — optional legacy/mobile stubs
 
 Screens implemented as mock UI: full chat, people, groups (including local group creation with member selection and avatar color), call history, voice/video/group call previews, profile, three-step onboarding, all settings categories, LAN announcements, floating icon/bubbles, compact quick-chat drawer, component gallery. Interactions include chat search, send, context menu, reply/edit/delete, theme, and profile edits. Core group-state checks require admin signatures, preserve membership invariants and require the next epoch for accepted updates. Remaining: native always-on-top dock/bubbles, real compact-window resizing, persistent settings/profile, live network group/file actions, TLS calls/signaling and WebRTC. This is a foundation build; later phases are not yet complete.
+
+Checkpoint report: [MORNING_REPORT.md](MORNING_REPORT.md) records the current implementation, limitations, hand checks, and run/build commands. It explicitly marks the nine-phase request incomplete.
