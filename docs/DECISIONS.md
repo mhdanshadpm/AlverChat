@@ -5,3 +5,4 @@
 - 2026-11-13: Keep the first visible peer list and conversation data mock-only; this makes every UI state reviewable without claiming a live LAN session.
 - 2026-11-13: Use source board originals plus deterministic 8-cell crop sheets and pixel palette samples under design/frames and docs/design-colors.json for review.
 - 2026-11-13: Keep group creation in the mock UI session state until signed group-state persistence and LAN fan-out are implemented; preserve the selected avatar palette color in the local group view.
+- 2026-11-13: Sign group rosters over a fixed-order JSON tuple with sorted, unique member IDs so every peer can verify admin authority and detect stale epochs consistently.

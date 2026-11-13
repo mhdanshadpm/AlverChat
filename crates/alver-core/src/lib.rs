@@ -2,6 +2,7 @@
 
 pub mod crypto;
 pub mod discovery;
+pub mod groups;
 pub mod identity;
 pub mod protocol;
 pub mod storage;
