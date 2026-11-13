@@ -21,7 +21,7 @@ pnpm install
 pnpm dev
 ```
 
-Desktop development: `pnpm tauri dev`. Production UI bundle: `pnpm build`. Rust workspace: `cargo build --workspace`.
+Desktop development: `pnpm dev:desktop`. Production UI bundle: `pnpm build`. Rust workspace: `cargo build --workspace`.
 
 Run `pnpm tauri dev` to launch the desktop app. Browser mode is only a UI development shell; it has no peer service and rejects message sends. The desktop UI does not seed sample conversations or claim that unsupported features succeeded. See [docs/PROGRESS.md](docs/PROGRESS.md) and [docs/BLOCKERS.md](docs/BLOCKERS.md) for current capability and release status.
 
