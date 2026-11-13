@@ -19,3 +19,13 @@
 8. Decision: create `dock`, `compact`, and `menu` as Rust-owned windows with hash routes in the shared UI bundle.
 9. Decision: keep overlay data in Rust-managed state and publish snapshot/update events; do not bridge state through localStorage.
 10. Decision: use Tauri's native always-on-top, transparency, workspace, drag, and cursor-ignore APIs; record platform tests that need real OS validation.
+
+## Draggable overlay widgets — 2026-11-13
+
+- Create `feature/draggable-widget` from the overlay branch and keep each change in a focused commit.
+- Use one React pointer-capture hook for dock and compact-panel dragging, with a 4 px threshold and animation-frame delta batching.
+- Move native windows with Rust `set_position` deltas so the dock remains non-activating and clicks are handled separately from drags.
+- Keep compact attached while the dock moves; dragging its header marks it detached, and reopening resets it to the dock anchor.
+- Save dock monitor name, edge, and vertical percentage in the app configuration directory; restore to the saved monitor when available and primary display otherwise.
+- Snap on release when edge snapping is enabled or the icon is within 24 logical pixels; honor system reduced-motion preference.
+- Use Rust geometry helpers with unit coverage for drag threshold, clamping, snapping, percentage restore, bubble side, and panel attachment.

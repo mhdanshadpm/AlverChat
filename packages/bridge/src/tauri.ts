@@ -13,8 +13,12 @@ export const tauriBridge: PlatformBridge = {
   openFullApp: (chatId) => invoke<void>('open_full_app', { chatId }),
   setOverlayHitRegions: (hasHit) => invoke<void>('set_overlay_hit_regions', { hasHit }),
   startOverlayDrag: () => invoke<void>('start_overlay_drag'),
+  moveOverlayBy: (deltaX, deltaY) => invoke<void>('move_overlay_by', { deltaX, deltaY }),
+  endOverlayDrag: (hasHit, reduceMotion) => invoke<void>('end_overlay_drag', { hasHit, reduceMotion }),
   resizeDock: (hasBubbles) => invoke<void>('resize_dock', { hasBubbles }),
   openDockMenu: () => invoke<void>('open_dock_menu'),
   hideMenu: () => invoke<void>('hide_menu'),
   quit: () => invoke<void>('quit_app'),
+  resetOverlayPosition: () => invoke<void>('reset_overlay_position'),
+  setSnapToEdge: (enabled) => invoke<void>('set_snap_to_edge', { enabled }),
 };

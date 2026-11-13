@@ -29,4 +29,29 @@ The overlay windows are created by Rust as `dock`, `compact`, and `menu` Webview
 
 ## Current implementation limits
 
-Tauri's WebView cursor-ignore switch is driven by pointer events inside each window. Native behavior must be verified because pointer re-entry after click-through can vary by OS/window manager. The `menu` route currently provides Open Quick chats, Open AlverChat, and Quit. The Rust peer list is preview data; LAN discovery, live incoming-message transport, and per-monitor position persistence are not implemented in this repository yet. On macOS the Tauri NSWindow receives the non-activating style mask, elevated level, and Space collection flags; it has not been converted to an NSPanel object. Windows-specific code has not been compiled on Windows in this environment. Hit-region changes rely on WebView pointer events, so pointer re-entry after click-through needs real-system validation and may require native cursor polling.
+The menu route provides Open Quick chats, Open AlverChat, Reset icon position, and Quit. The Rust peer list is preview data; LAN discovery and live incoming-message transport are not implemented in this repository yet. On macOS the Tauri NSWindow receives the non-activating style mask, elevated level, and Space collection flags; it has not been converted to an NSPanel object. Windows-specific code has not been compiled on Windows in this environment. Native cursor polling now updates hit regions while the pointer crosses click-through windows, but its behavior still needs real-system validation.
+
+## Draggable widget checks
+
+### Automated
+
+- [x] 4 px threshold, work-area clamping, nearest/near-edge snap, vertical-percentage restore, bubble edge choice, and panel follow/detach rules have Rust unit tests (`cargo test -p alverchat-desktop`).
+- [x] Drag moves are batched through `requestAnimationFrame`; native position changes use monitor scale factors.
+- [x] Position is stored per monitor name, edge, and vertical percentage and restored at startup; a missing monitor falls back to the primary display.
+- [x] Dock and compact panel use the same pointer-capture drag hook; compact header controls/search/tabs are excluded from the drag handle.
+- [x] Reset is available in Settings, the dock context menu, and tray menu.
+- [x] Snap animation observes `prefers-reduced-motion`.
+
+### Manual checks still required
+
+- [ ] Drag the icon over apps and between monitors at different scale settings; check that it stays under the pointer.
+- [ ] Short click opens Quick chats; moving 4 px or more drags without opening it; double click has no additional action.
+- [ ] Drag and release near each edge; quit/relaunch and confirm placement restore.
+- [ ] Disconnect/reconfigure a monitor and confirm the dock is clamped to a visible work area.
+- [ ] Drag the icon while compact is open; panel follows. Drag the panel header; panel detaches and remains clamped.
+- [ ] Test with fullscreen app frontmost and confirm drag does not activate AlverChat or steal typing focus.
+- [ ] Test click-through before, during, and after drag, including fast pointer exits.
+- [ ] Enable Reduce Motion and confirm edge snap moves instantly.
+- [ ] Use Settings, the dock context menu, and the tray menu to reset the icon position.
+
+Cross-platform pointer scaling and click-through re-entry still need real Windows and macOS validation. The current implementation uses WebView pointer capture and converts pointer deltas with the active window's scale factor; Windows code has not been compiled in this macOS environment.
