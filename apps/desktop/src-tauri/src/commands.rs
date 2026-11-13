@@ -24,7 +24,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
-use crate::{deliver_envelope, publish, start_outbox_retry, MessageDto, OverlayState};
+use crate::{
+    deliver_envelope, now_ms, publish, send_frame, start_outbox_retry, MessageDto, OverlayState,
+};
 
 /// The sender id the desktop shell writes for its own messages, edits and deletes.
 const ME: &str = "local";
@@ -154,13 +156,6 @@ pub(crate) struct GroupPatch {
 // Shared helpers.
 // ------------------------------------------------------------------------------------
 
-pub(crate) fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
 fn store<'a>(app: &'a AppHandle) -> Result<std::sync::MutexGuard<'a, Store>, String> {
     // `inner()` keeps the `&'a OverlayState` alive past the temporary `State` guard,
     // which is what lets the returned lock borrow from the app rather than the call.
@@ -224,6 +219,7 @@ fn message_dto(
     guard: &Store,
     message: &Message,
     replies: &BTreeMap<Uuid, Uuid>,
+    unread: &HashSet<Uuid>,
 ) -> Result<MessageDto, String> {
     let mine = message.sender == ME;
     Ok(MessageDto {
@@ -236,7 +232,9 @@ fn message_dto(
         },
         time: String::new(),
         mine,
-        read: false,
+        // Only my own read state is known locally; a peer's ticks stay pending until
+        // the protocol carries read receipts back over the wire.
+        read: mine || !unread.contains(&message.id),
         kind: if message.tombstone {
             "deleted".into()
         } else {
@@ -257,13 +255,22 @@ fn replies_of(guard: &Store, chat_id: &str) -> Result<BTreeMap<Uuid, Uuid>, Stri
     Ok(guard.replies_for_chat(chat_id)?.into_iter().collect())
 }
 
+/// Messages of a chat this device has not read yet, used for the unread divider.
+fn unread_of(guard: &Store, chat_id: &str) -> Result<HashSet<Uuid>, String> {
+    Ok(guard
+        .unread_ids_for_chat(chat_id, ME)?
+        .into_iter()
+        .collect())
+}
+
 /// The thread of one chat, as the bridge reads it.
 pub(crate) fn message_dtos(app: &AppHandle, chat_id: &str) -> Result<Vec<MessageDto>, String> {
     let guard = store(app)?;
     let replies = replies_of(&guard, chat_id)?;
+    let unread = unread_of(&guard, chat_id)?;
     let mut out = Vec::new();
     for message in guard.messages_for_chat(chat_id)? {
-        out.push(message_dto(&guard, &message, &replies)?);
+        out.push(message_dto(&guard, &message, &replies, &unread)?);
     }
     Ok(out)
 }
@@ -330,7 +337,8 @@ fn outgoing(
     publish(app);
     let guard = store(app)?;
     let replies = replies_of(&guard, chat_id)?;
-    message_dto(&guard, &message, &replies)
+    let unread = unread_of(&guard, chat_id)?;
+    message_dto(&guard, &message, &replies, &unread)
 }
 
 /// Sends one composer message, quoting `reply_to_id` when the UI supplied one.
@@ -702,9 +710,10 @@ pub(crate) fn starred_messages(app: AppHandle, chat_id: String) -> Result<Vec<Me
     let chat_id = parse_chat(&chat_id)?;
     let guard = store(&app)?;
     let replies = replies_of(&guard, &chat_id)?;
+    let unread = unread_of(&guard, &chat_id)?;
     let mut out = Vec::new();
     for starred in guard.starred_for_chat(&chat_id)? {
-        out.push(message_dto(&guard, &starred.message, &replies)?);
+        out.push(message_dto(&guard, &starred.message, &replies, &unread)?);
     }
     Ok(out)
 }
@@ -824,13 +833,43 @@ pub(crate) fn search_messages(
 }
 
 #[tauri::command]
-pub(crate) fn set_typing(chat_id: String, typing: bool) -> Result<(), String> {
+pub(crate) async fn set_typing(
+    app: AppHandle,
+    chat_id: String,
+    typing: bool,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || set_typing_blocking(app, chat_id, typing))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+/// Typing is advisory: a peer that is not reachable simply does not see the indicator,
+/// so the frame is best-effort and its failure never reaches the composer.
+fn set_typing_blocking(app: AppHandle, chat_id: String, typing: bool) -> Result<(), String> {
     let chat_id = parse_chat(&chat_id)?;
-    let _ = typing;
-    // Typing indicators are accepted and dropped here on purpose: the responder only
-    // handles `message` frames, so sending a `typing` frame would close the session.
-    // docs/BLOCKERS.md tracks the frame kind this needs.
-    let _ = chat_id;
+    let beacon = app
+        .state::<OverlayState>()
+        .endpoints
+        .lock()
+        .map_err(|_| "peer endpoint lock poisoned")?
+        .get(&chat_id)
+        .cloned();
+    let Some(beacon) = beacon else {
+        return Ok(());
+    };
+    let envelope = Envelope {
+        v: PROTOCOL_VERSION,
+        id: Uuid::now_v7(),
+        kind: "typing".into(),
+        from: my_peer_id(&app),
+        to: beacon.peer_id.clone(),
+        hlc: Hlc {
+            physical_ms: now_ms(),
+            logical: 0,
+        },
+        payload: serde_json::json!({"typing": typing}),
+    };
+    let _ = send_frame(&app, &beacon, &envelope);
     Ok(())
 }
 

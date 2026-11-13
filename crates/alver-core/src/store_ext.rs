@@ -463,6 +463,31 @@ impl Store {
             .map_err(|error| error.to_string())
     }
 
+    /// Ids of the messages a chat reader has not read yet, oldest first.
+    ///
+    /// Same predicate as [`Store::unread_messages_for_chat`], but it gives a caller the
+    /// position of the unread divider as well as its count.
+    pub fn unread_ids_for_chat(&self, chat_id: &str, reader_id: &str) -> Result<Vec<Uuid>, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT id FROM messages \
+                 WHERE chat_id = ?1 AND tombstone = 0 AND sender <> ?2 \
+                 AND NOT EXISTS (SELECT 1 FROM receipts WHERE receipts.message_id = messages.id \
+                                 AND receipts.peer_id = ?2 AND receipts.kind = 'read') \
+                 ORDER BY physical_ms, logical, id",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(params![chat_id, reader_id], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?;
+        rows.map(|row| {
+            row.map_err(|error| error.to_string())
+                .and_then(|id| Uuid::parse_str(&id).map_err(|error| error.to_string()))
+        })
+        .collect()
+    }
+
     /// Records a read receipt for every unread message of a chat; returns how many cleared.
     ///
     /// Written in one statement instead of through [`Store::record_receipt`] per row, and
@@ -2056,6 +2081,17 @@ mod tests {
             store.unread_messages_for_chat("chat-read", reader).unwrap(),
             2
         );
+        assert_eq!(
+            store.unread_ids_for_chat("chat-read", reader).unwrap(),
+            vec![first.id, second.id],
+            "unread ids arrive oldest first, so a divider can be placed on the first"
+        );
+        store.mark_chat_read("chat-read", reader, 19).unwrap();
+        assert!(store
+            .unread_ids_for_chat("chat-read", reader)
+            .unwrap()
+            .is_empty());
+        store.mark_chat_unread("chat-read", reader).unwrap();
         assert_eq!(
             store
                 .first_unread_message_for_chat("chat-read", reader)

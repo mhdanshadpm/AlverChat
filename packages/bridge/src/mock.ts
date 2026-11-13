@@ -182,6 +182,13 @@ const findConversation = (messageId: string): ChatMessage[] | undefined => {
   return undefined;
 };
 
+/** The tail of a thread the reader has not seen, mirroring the desktop read receipts. */
+const unreadTail = (chatId: string, thread: ChatMessage[]): ChatMessage[] => {
+  const wanted = UNREAD.get(chatId) ?? peers.find(peer => peer.id === chatId)?.unread ?? 0;
+  if (wanted <= 0) return [];
+  return thread.filter(message => !message.mine && message.kind !== 'deleted').slice(-wanted);
+};
+
 /** Mock unread counters live here so `markAsRead` can still clear the fixture values. */
 const applyUnread = (): Peer[] => {
   peers = peers.map(peer => (UNREAD.has(peer.id) ? { ...peer, unread: UNREAD.get(peer.id) || undefined } : peer));
@@ -214,7 +221,11 @@ const delay = <T,>(value: T): Promise<T> => new Promise(resolve => setTimeout(()
 export const mockBridge: PlatformBridge = {
   ...emptyMockMethods(),
   listPeers: () => delay(scenarioPeers()),
-  listMessages: (chatId) => delay(rich(chatId)),
+  listMessages: (chatId) => {
+    const thread = rich(chatId);
+    const unseen = new Set(unreadTail(chatId, thread).map(message => message.id));
+    return delay(thread.map(message => (unseen.has(message.id) ? { ...message, read: false } : message)));
+  },
   sendMessage: (chatId, text, replyToId) => {
     const created: ChatMessage = { id: `out-${++seq}`, sender: 'You', text, ...at(0), mine: true, read: true, kind: 'text', deliveryStatus: 'delivered', replyTo: replyToId };
     const next = [...(CONVERSATIONS[chatId] ?? []), created];
@@ -342,7 +353,7 @@ export const mockBridge: PlatformBridge = {
   },
   markUnread: (chatId): Promise<UnreadState[]> => {
     UNREAD.set(chatId, (UNREAD.get(chatId) ?? 0) + 1);
-    const first = (CONVERSATIONS[chatId] ?? []).find(message => !message.mine);
+    const first = unreadTail(chatId, rich(chatId))[0];
     return delay(applyUnread().map(peer => ({ chatId: peer.id, unread: UNREAD.get(peer.id) ?? peer.unread ?? 0, firstUnreadId: peer.id === chatId ? first?.id ?? null : null })));
   },
   clearChat: (chatId) => { CONVERSATIONS[chatId] = []; delete PINNED[chatId]; return delay(undefined); },

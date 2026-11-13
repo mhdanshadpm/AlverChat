@@ -154,6 +154,8 @@ struct OverlayState {
     peers: Mutex<Vec<PeerDto>>,
     endpoints: Mutex<HashMap<String, PeerBeacon>>,
     retrying_peers: Mutex<HashSet<String>>,
+    /// When each peer's "typing…" flag lapses, so a dropped frame cannot strand it.
+    typing_until: Mutex<HashMap<String, u64>>,
     identity: Arc<Identity>,
     peer_sessions: Arc<AtomicUsize>,
     store: Mutex<Store>,
@@ -173,6 +175,62 @@ impl Drop for PeerSessionGuard {
     }
 }
 
+/// Wall-clock milliseconds since the epoch, clamped for 32-bit casts.
+pub(crate) fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// How long a received "typing…" flag stays up without another frame.
+const TYPING_WINDOW_MS: u64 = 6_000;
+
+/// Applies a peer typing flag and its expiry, then republishes the overlays.
+fn apply_typing(app: &AppHandle, peer_id: &str, typing: bool) {
+    let state = app.state::<OverlayState>();
+    if let Ok(mut until) = state.typing_until.lock() {
+        if typing {
+            until.insert(peer_id.to_owned(), now_ms() + TYPING_WINDOW_MS);
+        } else {
+            until.remove(peer_id);
+        }
+    }
+    if let Ok(mut peers) = state.peers.lock() {
+        if let Some(peer) = peers.iter_mut().find(|peer| peer.id == peer_id) {
+            peer.typing = typing;
+        }
+    }
+    publish(app);
+}
+
+/// Drops typing flags whose window passed; returns whether anything changed.
+fn expire_typing(app: &AppHandle) {
+    let state = app.state::<OverlayState>();
+    let now = now_ms();
+    let mut stale = Vec::new();
+    if let Ok(mut until) = state.typing_until.lock() {
+        until.retain(|peer_id, until_ms| {
+            let live = *until_ms > now;
+            if !live {
+                stale.push(peer_id.clone());
+            }
+            live
+        });
+    }
+    if stale.is_empty() {
+        return;
+    }
+    if let Ok(mut peers) = state.peers.lock() {
+        for peer in peers.iter_mut() {
+            if stale.contains(&peer.id) {
+                peer.typing = false;
+            }
+        }
+    }
+    publish(app);
+}
+
 fn known_peers(store: &Store) -> Result<Vec<PeerDto>, String> {
     store
         .known_peers()?
@@ -189,6 +247,9 @@ fn known_peers(store: &Store) -> Result<Vec<PeerDto>, String> {
                     }
                 })
                 .unwrap_or_default();
+            // Read receipts are the durable source: a restart must not re-flag
+            // messages the user has already seen.
+            let unread = store.unread_messages_for_chat(&stored.id, "local")?;
             Ok(PeerDto {
                 id: stored.id,
                 name: stored.name.clone(),
@@ -204,7 +265,7 @@ fn known_peers(store: &Store) -> Result<Vec<PeerDto>, String> {
                 status: "Offline · last seen on LAN".into(),
                 preview,
                 time: String::new(),
-                unread: None,
+                unread: (unread > 0).then_some(unread as u32),
                 group: false,
                 typing: false,
                 muted: false,
@@ -379,11 +440,23 @@ fn handle_peer_session(
     loop {
         let envelope: Envelope<Value> = session.receive()?;
         if envelope.v != PROTOCOL_VERSION
-            || envelope.kind != "message"
             || envelope.from != remote.peer_id
             || envelope.to != identity.peer_id()
+            || !matches!(envelope.kind.as_str(), "message" | "typing")
         {
             return Err("incoming message envelope is invalid".into());
+        }
+        if envelope.kind == "typing" {
+            let typing = envelope
+                .payload
+                .get("typing")
+                .and_then(Value::as_bool)
+                .ok_or("typing frame has no flag")?;
+            apply_typing(&app, &remote.peer_id, typing);
+            let acked = envelope.id;
+            let stamp = now_ms();
+            session.send(&receipt_for(&identity, &remote.peer_id, acked, stamp))?;
+            continue;
         }
         let body = envelope
             .payload
@@ -463,20 +536,24 @@ fn handle_peer_session(
                 platform::notify_message(&app, &sender, body);
             }
         }
-        let receipt = Envelope {
-            v: PROTOCOL_VERSION,
-            id: Uuid::now_v7(),
-            kind: "receipt".into(),
-            from: identity.peer_id(),
-            to: remote.peer_id.clone(),
-            hlc: Hlc {
-                physical_ms: now_ms,
-                logical: 0,
-            },
-            payload: serde_json::json!({"message_id": message.id.to_string(), "status":"delivered"}),
-        };
-        session.send(&receipt)?;
+        session.send(&receipt_for(&identity, &remote.peer_id, message.id, now_ms))?;
         let _ = app.emit("messages-changed", remote.peer_id.clone());
+    }
+}
+
+/// The receipt every accepted frame gets back, so the sender can mark its outbox row.
+fn receipt_for(identity: &Identity, peer_id: &str, frame_id: Uuid, at_ms: u64) -> Envelope<Value> {
+    Envelope {
+        v: PROTOCOL_VERSION,
+        id: Uuid::now_v7(),
+        kind: "receipt".into(),
+        from: identity.peer_id(),
+        to: peer_id.to_owned(),
+        hlc: Hlc {
+            physical_ms: at_ms,
+            logical: 0,
+        },
+        payload: serde_json::json!({"message_id": frame_id.to_string(), "status": "delivered"}),
     }
 }
 
@@ -513,6 +590,25 @@ fn deliver_envelope(
     beacon: &PeerBeacon,
     envelope: &Envelope<Value>,
 ) -> Result<(), String> {
+    send_frame(app, beacon, envelope)?;
+    app.state::<OverlayState>()
+        .store
+        .lock()
+        .map_err(|_| "message store lock poisoned")?
+        .acknowledge_outbox(envelope.id)?;
+    let _ = app.emit("messages-changed", envelope.to.clone());
+    Ok(())
+}
+
+/// Handshakes with one beacon, sends a single frame and waits for its receipt.
+///
+/// The beacon's published key is the pin: the handshake fails if the peer cannot
+/// prove it owns that identity, so an address spoof on the LAN buys nothing.
+pub(crate) fn send_frame(
+    app: &AppHandle,
+    beacon: &PeerBeacon,
+    envelope: &Envelope<Value>,
+) -> Result<(), String> {
     let state = app.state::<OverlayState>();
     let expected = RemoteIdentity {
         peer_id: beacon.peer_id.clone(),
@@ -528,22 +624,16 @@ fn deliver_envelope(
         .trust_peer(&expected.peer_id, &expected.public_key)?;
     session.send(envelope)?;
     let receipt: Envelope<Value> = session.receive()?;
-    let message_id = envelope.id.to_string();
+    let frame_id = envelope.id.to_string();
     if receipt.v != PROTOCOL_VERSION
         || receipt.kind != "receipt"
         || receipt.from != expected.peer_id
         || receipt.to != state.identity.peer_id()
         || receipt.payload.get("status").and_then(Value::as_str) != Some("delivered")
-        || receipt.payload.get("message_id").and_then(Value::as_str) != Some(message_id.as_str())
+        || receipt.payload.get("message_id").and_then(Value::as_str) != Some(frame_id.as_str())
     {
         return Err("peer returned an invalid delivery receipt".into());
     }
-    state
-        .store
-        .lock()
-        .map_err(|_| "message store lock poisoned")?
-        .acknowledge_outbox(envelope.id)?;
-    let _ = app.emit("messages-changed", envelope.to.clone());
     Ok(())
 }
 
@@ -649,7 +739,7 @@ fn start_peer_discovery(app: AppHandle, identity: Arc<Identity>, port: u16) -> R
                     }
                 }
                 Ok(_) => {}
-                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Timeout) => expire_typing(&app),
                 Err(RecvTimeoutError::Disconnected) => break,
             }
         }
@@ -702,7 +792,7 @@ fn mark_as_read(app: AppHandle, chat_id: String) {
     // Read receipts are what make an unread badge durable across restarts, so
     // clearing the in-memory counter alone would let it come back.
     if let Ok(mut store) = app.state::<OverlayState>().store.lock() {
-        let _ = store.mark_chat_read(&chat_id, "local", commands::now_ms());
+        let _ = store.mark_chat_read(&chat_id, "local", now_ms());
     }
     if let Ok(mut peers) = app.state::<OverlayState>().peers.lock() {
         if let Some(peer) = peers.iter_mut().find(|peer| peer.id == chat_id) {
@@ -1710,6 +1800,7 @@ fn main() {
                 peers: Mutex::new(initial_peers),
                 endpoints: Mutex::new(HashMap::new()),
                 retrying_peers: Mutex::new(HashSet::new()),
+                typing_until: Mutex::new(HashMap::new()),
                 identity: identity.clone(),
                 peer_sessions: Arc::new(AtomicUsize::new(0)),
                 store: Mutex::new(store),

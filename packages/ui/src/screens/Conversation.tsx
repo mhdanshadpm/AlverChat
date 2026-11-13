@@ -227,18 +227,20 @@ export function Conversation({
     setEditing(null);
     setReplyTo(null);
     setPinIndex(0);
-    void bridge.markAsRead(chatId).catch(() => undefined);
-    void bridge
-      .markUnread(chatId)
-      .then(states => {
-        if (!alive) return;
-        const state = states.find(entry => entry.chatId === chatId);
-        setFirstUnread(state?.firstUnreadId ?? null);
-        setUnreadCount(state?.unread ?? 0);
-      })
-      .catch(() => undefined);
+    setFirstUnread(null);
+    setUnreadCount(0);
     void (async () => {
+      // The unread span has to be read before opening the chat clears it.
+      const before = await bridge.listMessages(chatId).catch(() => [] as ChatMessage[]);
+      const unseen = before.filter(
+        message => !message.mine && message.kind !== 'deleted' && !message.read,
+      );
+      if (alive && unseen.length > 0) {
+        setFirstUnread(unseen[0].id);
+        setUnreadCount(unseen.length);
+      }
       if (!alive) return;
+      void bridge.markAsRead(chatId).catch(() => undefined);
       await reload();
     })();
     return () => {
@@ -252,7 +254,9 @@ export function Conversation({
     if (revision === undefined || seenRevision.current === revision) return;
     seenRevision.current = revision;
     void reload();
-  }, [revision, reload]);
+    // A message that arrives into an open chat is read as it appears.
+    void bridge.markAsRead(chatId).catch(() => undefined);
+  }, [bridge, chatId, reload, revision]);
 
   const byId = useMemo(() => new Map(messages.map(message => [message.id, message])), [messages]);
   const attachmentByMessage = useMemo(() => {
@@ -340,6 +344,33 @@ export function Conversation({
     [findHits, findIndex, rows, virtualizer],
   );
 
+  /* ===== typing indicator ================================================ */
+
+  const typingPulse = useRef(0);
+  const typingTimer = useRef<number | null>(null);
+
+  const stopTyping = useCallback(() => {
+    if (typingTimer.current !== null) window.clearTimeout(typingTimer.current);
+    typingTimer.current = null;
+    if (typingPulse.current === 0) return;
+    typingPulse.current = 0;
+    void bridge.setTyping(chatId, false).catch(() => undefined);
+  }, [bridge, chatId]);
+
+  const announceTyping = useCallback(() => {
+    const now = Date.now();
+    // One frame per three seconds while the user keeps typing; the peer's flag
+    // lapses on its own if this window dies mid-sentence.
+    if (now - typingPulse.current > 3_000) {
+      typingPulse.current = now;
+      void bridge.setTyping(chatId, true).catch(() => undefined);
+    }
+    if (typingTimer.current !== null) window.clearTimeout(typingTimer.current);
+    typingTimer.current = window.setTimeout(stopTyping, 4_000);
+  }, [bridge, chatId, stopTyping]);
+
+  useEffect(() => stopTyping, [stopTyping]);
+
   /* ===== mutations ======================================================= */
 
   const send = useCallback(async () => {
@@ -349,6 +380,7 @@ export function Conversation({
     if (inputRef.current) inputRef.current.style.height = 'auto';
     try {
       await bridge.sendMessage(chatId, body, replyTo?.id);
+      stopTyping();
       setReplyTo(null);
       await reload();
       requestAnimationFrame(() => jumpToLatest());
@@ -356,7 +388,7 @@ export function Conversation({
       setDraft(body);
       toast(String(error), 'danger');
     }
-  }, [bridge, chatId, draft, jumpToLatest, reload, replyTo, toast]);
+  }, [bridge, chatId, draft, jumpToLatest, reload, replyTo, stopTyping, toast]);
 
   const commitEdit = useCallback(async () => {
     if (!editing) return;
@@ -940,6 +972,7 @@ export function Conversation({
               onChange={event => {
                 setDraft(editing ? '' : event.target.value);
                 if (editing) setEditing({ ...editing, text: event.target.value });
+                else if (event.target.value.trim()) announceTyping();
                 event.target.style.height = 'auto';
                 event.target.style.height = `${Math.min(event.target.scrollHeight, 148)}px`;
               }}
