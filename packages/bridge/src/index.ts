@@ -1,6 +1,6 @@
 export const APP_NAME = "AlverChat";
 export type Peer = { id:string; name:string; initials:string; color:string; online:boolean; status:string; preview:string; time:string; unread?:number; group?:boolean; typing?:boolean; muted?:boolean; pinned?:boolean };
-export type ChatMessage = { id:string; sender:string; text:string; time:string; mine?:boolean; read?:boolean; kind?:'text'|'file'|'event'; fileName?:string };
+export type ChatMessage = { id:string; sender:string; text:string; time:string; mine?:boolean; read?:boolean; kind?:'text'|'file'|'event'|'deleted'; fileName?:string; edited?:boolean; replyTo?:string };
 export interface PlatformBridge {
   listPeers(): Promise<Peer[]>;
   listMessages(chatId:string): Promise<ChatMessage[]>;
