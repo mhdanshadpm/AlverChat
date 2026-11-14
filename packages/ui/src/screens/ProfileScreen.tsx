@@ -1082,16 +1082,22 @@ export function ProfileScreen(props: ScreenProps) {
   }, []);
 
   /**
-   * The single call seam: when the WebRTC engine lands, this body becomes
-   * `bridge.startCall(contact.id, kind)` and nothing else changes.
+   * Dial out through the shared call controller; the kind names are the
+   * profile screen's "voice"/"video" while the bridge uses "audio"/"video".
    */
   const startCall = useCallback(
     (peer: Peer, kind: 'video' | 'voice') => {
-      void kind;
-      void peer;
-      toast(text('callsPhase6', 'Calls arrive in phase 6.'), 'neutral');
+      if (peer.group) {
+        toast(text('callsGroupsLater', 'Group calls are not available yet.'), 'neutral');
+        return;
+      }
+      if (!props.onCall) {
+        toast(text('callsUnavailable', 'Calls are unavailable on this device.'), 'neutral');
+        return;
+      }
+      props.onCall(peer.id, kind === 'voice' ? 'audio' : 'video');
     },
-    [toast],
+    [props, toast],
   );
 
   const toggleMute = useCallback(

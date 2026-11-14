@@ -85,4 +85,25 @@
 - A profile is refused when its store does not match its database, in both directions, with the fix in the message. Without it the first hatch run fails as "file is not a database" after quietly generating a key, and unsetting the flag afterwards would leave the profile unopenable.
 - The hatch is documented with a scratch `ALVERCHAT_DATA_DIR`, because reusing the real profile is exactly the mismatch the guard refuses; two dev profiles also stop sharing one identity.
 
+## Message latency — 2026-11-14 12:00
 
+- macOS resolves a peer's mDNS name to its link-local IPv6 address before the IPv4 one, and a connect to that address stalls for the whole five-second timeout before IPv4 is tried. `connect_to_peer` now races every resolved address and keeps the first that connects, so a send is bounded by the reachable address instead of the unreachable one.
+- One dialed session per peer stays warm for 30 seconds (`OUTBOUND_IDLE`), so a message, typing flag or receipt reuses it instead of paying another resolve, TCP connect and TLS handshake. The responder closes a silent session after 60 seconds, so the window stays inside that. Any send error drops the session and retries once with a fresh dial; a replayed envelope is harmless because the store dedupes by message id.
+- The composer queues the message and returns: the bubble appears immediately as pending, and the outbox plus its retry loop own delivery. The status flips to sent through the existing `messages-changed` signal when the receipt lands, so the UI never blocks on a peer handshake.
+
+
+
+## File offers reach the receiver — 2026-11-14 12:20
+
+- An incoming `file_offer` was compared against the sender's peer id (`payload.chat_id != remote`), but the app builds `chat_id` as the *receiver* it addresses. Every offer was therefore rejected as "not theirs", the receiver closed the session without a receipt, and the sender retried forever with a bubble stuck at "Sending… 0%". The check now compares the payload's `chat_id` with this device's own peer id.
+- The outbox retry loop used to exit whenever the peer had no endpoint, so an offer queued while discovery was between resolutions was never delivered. It now backs off (1 s → 60 s) and keeps watching the pending queue instead of breaking.
+- A re-offer with no current endpoint no longer drops its delivery attempt: the retry loop owns the queued offer and delivers it when the peer reappears.
+- Verified with two fresh profiles on one machine: two 615 KB offers were auto-accepted, pulled, blake3-verified and renamed into the receiver's downloads folder; both databases report `Completed` and both outboxes are empty.
+
+## Phase 6 calls — 2026-11-14
+
+- The Rust shell stays a signaling relay, not a call state machine: `send_call_signal` turns one webview signal into the protocol frame, enqueues it on the durable outbox, and `handle_signal` records the call log and re-emits the frame to the UI as `call-signal`. SDP/ICE bodies are opaque to Rust; media never leaves the WebRTC stack.
+- Call frames ride the existing warm outbound session beside messages (whitelist extended by `calls::handled_kind`), so signaling inherits TLS, peer-key pinning, receipts and offline outbox retry for free. A missing endpoint queues the frame instead of dropping it — signaling may be the first frame after a reconnect.
+- One live call at a time, and the caller is the only side that renegotiates (screen share, camera on/off): the receiver answers every offer. That avoids the perfect-negotiation glare machinery for a two-peer call.
+- WebRTC runs with `iceServers: []` — host candidates only, LAN by construction, nothing leaks to a STUN server.
+- Both the full app and the compact quick window mount their own `useCall` and listen to `call-signal`, so an incoming call rings in whichever surface is open; the call surface sits in an `overlay-hit` wrapper so the click-through hit regions keep working over the compact window.

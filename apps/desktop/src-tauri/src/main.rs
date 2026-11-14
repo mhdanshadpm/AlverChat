@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod calls;
 mod commands;
 mod drag;
 mod file_transfer;
@@ -9,26 +10,28 @@ mod websocket;
 
 use alver_core::{
     discovery::{MdnsDiscovery, PeerBeacon},
+    groups::EVERYONE_GROUP_ID,
     identity::Identity,
     payloads::kind,
     storage::Store,
     transport::{initiator_handshake, responder_handshake, RemoteIdentity, SecureStream},
     Envelope, Hlc, Message, PROTOCOL_VERSION,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use drag::{Edge, Rect};
 use mdns_sd::{RecvTimeoutError, ServiceEvent};
 use rand_core::{OsRng, RngCore};
 use serde::Serialize;
 use serde_json::Value;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{hash_map::Entry, HashMap, HashSet},
     fs, io,
     net::{TcpListener, TcpStream, ToSocketAddrs},
     path::PathBuf,
-    sync::atomic::{AtomicU16, AtomicUsize, Ordering},
-    sync::{Arc, Mutex},
+    sync::atomic::{AtomicU16, AtomicU64, AtomicUsize, Ordering},
+    sync::{mpsc, Arc, Mutex},
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
@@ -152,10 +155,22 @@ struct SavedDockPosition {
 struct OverlayPreferences {
     dock_position: Option<SavedDockPosition>,
 }
+/// A dialed, authenticated session kept open between frames.
+struct OutboundSession {
+    stream: SecureStream<websocket::BlockingWebSocket>,
+    used: Instant,
+}
+
+/// How long a warm session may sit idle. The peer closes a silent session after 60 s,
+/// so this stays well inside that window.
+const OUTBOUND_IDLE: Duration = Duration::from_secs(30);
+
 struct OverlayState {
     compact_open: Mutex<bool>,
     peers: Mutex<Vec<PeerDto>>,
     endpoints: Mutex<HashMap<String, PeerBeacon>>,
+    /// Warm outbound sessions, so a follow-up frame skips the resolve and handshake.
+    outbound: Mutex<HashMap<String, Arc<Mutex<OutboundSession>>>>,
     retrying_peers: Mutex<HashSet<String>>,
     /// When each peer's "typing…" flag lapses, so a dropped frame cannot strand it.
     typing_until: Mutex<HashMap<String, u64>>,
@@ -165,6 +180,11 @@ struct OverlayState {
     pulling: Mutex<HashSet<Uuid>>,
     identity: Arc<Identity>,
     peer_sessions: Arc<AtomicUsize>,
+    /// Cached LAN passphrase: `None` = not read yet, `Some(None)` = no passphrase set.
+    lan_passphrase: Mutex<Option<Option<Vec<u8>>>>,
+    /// Bumped whenever the passphrase changes, so sessions authenticated under the
+    /// previous policy stop carrying traffic until the peer proves the new one.
+    auth_epoch: AtomicU64,
     store: Mutex<Store>,
     preferences: Mutex<OverlayPreferences>,
     preferences_path: PathBuf,
@@ -438,6 +458,11 @@ fn handle_peer_session(
     if remote.peer_id == identity.peer_id() {
         return Err("self-connections are not accepted".into());
     }
+    authenticate_session(&app, &mut session, &remote.peer_id)?;
+    let epoch = app
+        .state::<OverlayState>()
+        .auth_epoch
+        .load(Ordering::Acquire);
     app.state::<OverlayState>()
         .store
         .lock()
@@ -445,14 +470,52 @@ fn handle_peer_session(
         .trust_peer(&remote.peer_id, &remote.public_key)?;
 
     loop {
+        // A passphrase change must end sessions authenticated under the old policy,
+        // or enabling encryption would leave an open channel behind.
+        if app
+            .state::<OverlayState>()
+            .auth_epoch
+            .load(Ordering::Acquire)
+            != epoch
+        {
+            return Err("LAN passphrase changed; this session must reconnect".into());
+        }
         let envelope: Envelope<Value> = session.receive()?;
         let file_frame = file_transfer::handled_kind(&envelope.kind);
+        let call_frame = calls::handled_kind(&envelope.kind);
+        let roster_frame = commands::handled_kind(&envelope.kind);
         if envelope.v != PROTOCOL_VERSION
             || envelope.from != remote.peer_id
             || envelope.to != identity.peer_id()
-            || (!file_frame && !matches!(envelope.kind.as_str(), "message" | "typing"))
+            || (!file_frame
+                && !call_frame
+                && !roster_frame
+                && !matches!(envelope.kind.as_str(), "message" | "typing"))
         {
             return Err("incoming message envelope is invalid".into());
+        }
+        if roster_frame {
+            match envelope.kind.as_str() {
+                "group" => commands::handle_group_frame(&app, &remote.peer_id, &envelope)?,
+                "announcement" => {
+                    commands::handle_announcement_frame(&app, &remote.peer_id, &envelope)?
+                }
+                "announcement_ack" => {
+                    commands::handle_announcement_ack(&app, &remote.peer_id, &envelope)?
+                }
+                _ => return Err("unknown roster frame kind".into()),
+            }
+            let acked = envelope.id;
+            let stamp = now_ms();
+            session.send(&receipt_for(&identity, &remote.peer_id, acked, stamp))?;
+            continue;
+        }
+        if call_frame {
+            calls::handle_signal(&app, &remote.peer_id, &envelope)?;
+            let acked = envelope.id;
+            let stamp = now_ms();
+            session.send(&receipt_for(&identity, &remote.peer_id, acked, stamp))?;
+            continue;
         }
         if envelope.kind == kind::FILE_OFFER {
             // The offer carries no bytes; it is stored, receipted, and the pull starts
@@ -495,6 +558,29 @@ fn handle_peer_session(
         if body.trim().is_empty() || body.len() > 16_384 {
             return Err("incoming message text is outside the supported size".into());
         }
+        // A direct message names the receiver as its chat; a group post names the group.
+        // A group is only trusted when this device knows it and the sender is on the roster
+        // (Everyone is automatic, so any discovered peer belongs to it).
+        let chat_id = envelope
+            .payload
+            .get("chat_id")
+            .and_then(Value::as_str)
+            .filter(|chat| !chat.is_empty() && *chat != identity.peer_id())
+            .map(str::to_owned)
+            .unwrap_or_else(|| remote.peer_id.clone());
+        if chat_id != remote.peer_id && chat_id != EVERYONE_GROUP_ID {
+            let state = app.state::<OverlayState>();
+            let guard = state
+                .store
+                .lock()
+                .map_err(|_| "message store lock poisoned")?;
+            let group = guard
+                .get_group_state(&chat_id)?
+                .ok_or("incoming message names a group this device does not know")?;
+            if !group.is_member(&remote.peer_id) {
+                return Err("incoming group message came from a non-member".into());
+            }
+        }
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -504,7 +590,7 @@ fn handle_peer_session(
         }
         let message = Message {
             id: envelope.id,
-            chat_id: remote.peer_id.clone(),
+            chat_id,
             sender: remote.peer_id.clone(),
             body: body.to_owned(),
             clock: envelope.hlc,
@@ -533,7 +619,7 @@ fn handle_peer_session(
         if let Ok(mut peers) = app.state::<OverlayState>().peers.lock() {
             if let Some(peer) = peers.iter_mut().find(|peer| peer.id == remote.peer_id) {
                 peer.preview = body.to_owned();
-                if is_new {
+                if is_new && message.chat_id == remote.peer_id {
                     peer.unread = Some(peer.unread.unwrap_or(0).saturating_add(1));
                 }
             }
@@ -549,7 +635,7 @@ fn handle_peer_session(
                 .get_webview_window("main")
                 .and_then(|main| main.is_focused().ok())
                 .unwrap_or(false);
-            if !focused && platform::should_notify(&settings, &remote.peer_id, now_ms) {
+            if !focused && platform::should_notify(&settings, &message.chat_id, now_ms) {
                 let sender = app
                     .state::<OverlayState>()
                     .peers
@@ -566,7 +652,7 @@ fn handle_peer_session(
             }
         }
         session.send(&receipt_for(&identity, &remote.peer_id, message.id, now_ms))?;
-        let _ = app.emit("messages-changed", remote.peer_id.clone());
+        let _ = app.emit("messages-changed", message.chat_id.clone());
     }
 }
 
@@ -586,7 +672,125 @@ fn receipt_for(identity: &Identity, peer_id: &str, frame_id: Uuid, at_ms: u64) -
     }
 }
 
+/// The LAN passphrase, read from the credential store once per process.
+pub(crate) fn lan_passphrase(app: &AppHandle) -> Option<Vec<u8>> {
+    let state = app.state::<OverlayState>();
+    let Ok(mut cache) = state.lan_passphrase.lock() else {
+        return None;
+    };
+    if cache.is_none() {
+        let secret = crate::secrets::Secrets::open(app)
+            .ok()
+            .and_then(|secrets| secrets.get(platform::PASSPHRASE_ACCOUNT).ok())
+            .flatten()
+            .filter(|value| !value.is_empty());
+        *cache = Some(secret);
+    }
+    cache.clone().flatten()
+}
+
+/// Drops the cached passphrase after the settings screen changes it.
+pub(crate) fn forget_lan_passphrase(app: &AppHandle) {
+    if let Ok(mut cache) = app.state::<OverlayState>().lan_passphrase.lock() {
+        *cache = None;
+    }
+}
+
+/// Challenge MAC over both identities and the sender's nonce.
+fn auth_mac(passphrase: &[u8], from: &str, to: &str, nonce: &str) -> [u8; 32] {
+    let key = blake3::hash(passphrase);
+    let message = format!("alverchat-lan-v1\0{from}\0{to}\0{nonce}");
+    *blake3::keyed_hash(key.as_bytes(), message.as_bytes()).as_bytes()
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .fold(0_u8, |acc, (a, b)| acc | (a ^ b))
+            == 0
+}
+
+/// Proves both ends know the same LAN passphrase before any traffic flows.
+///
+/// A device with no passphrase accepts only a peer that also has none, so a half-set
+/// pair fails loudly on both sides instead of silently downgrading to open traffic.
+fn authenticate_session<S>(
+    app: &AppHandle,
+    session: &mut SecureStream<S>,
+    remote_id: &str,
+) -> Result<(), String>
+where
+    S: std::io::Read + std::io::Write,
+{
+    let my_id = app.state::<OverlayState>().identity.peer_id();
+    let passphrase = lan_passphrase(app);
+    let mut nonce_bytes = [0_u8; 32];
+    OsRng.fill_bytes(&mut nonce_bytes);
+    let nonce = BASE64.encode(nonce_bytes);
+    let mac = passphrase
+        .as_deref()
+        .map(|secret| BASE64.encode(auth_mac(secret, &my_id, remote_id, &nonce)));
+    let challenge = Envelope {
+        v: PROTOCOL_VERSION,
+        id: Uuid::now_v7(),
+        kind: "auth".into(),
+        from: my_id.clone(),
+        to: remote_id.to_owned(),
+        hlc: Hlc {
+            physical_ms: now_ms(),
+            logical: 0,
+        },
+        payload: serde_json::json!({"nonce": nonce, "mac": mac}),
+    };
+    session.send(&challenge)?;
+    let reply: Envelope<Value> = session.receive()?;
+    if reply.v != PROTOCOL_VERSION
+        || reply.kind != "auth"
+        || reply.from != remote_id
+        || reply.to != my_id
+    {
+        return Err("peer did not answer the LAN passphrase challenge".into());
+    }
+    let peer_nonce = reply
+        .payload
+        .get("nonce")
+        .and_then(Value::as_str)
+        .ok_or("peer challenge has no nonce")?;
+    let peer_mac = reply
+        .payload
+        .get("mac")
+        .and_then(Value::as_str)
+        .filter(|mac| !mac.is_empty());
+    match (passphrase.as_deref(), peer_mac) {
+        (Some(secret), Some(mac)) => {
+            let expected = auth_mac(secret, remote_id, &my_id, peer_nonce);
+            let received = BASE64
+                .decode(mac)
+                .map_err(|_| "peer challenge MAC is not base64")?;
+            if !constant_time_eq(&expected, &received) {
+                return Err("LAN passphrase does not match this peer".into());
+            }
+        }
+        (Some(_), None) => {
+            return Err("peer has no LAN passphrase but this device requires one".into())
+        }
+        (None, Some(_)) => {
+            return Err("this device has no LAN passphrase but the peer requires one".into())
+        }
+        (None, None) => {}
+    }
+    Ok(())
+}
+
+/// Dials one beacon, racing every address its mDNS name resolved to.
+///
+/// macOS lists the peer's link-local IPv6 address first, and a connect to it stalls for
+/// the whole timeout before IPv4 gets a turn. Racing the candidates lets the reachable
+/// address win, so a send is bounded by the good address instead of the bad one.
 fn connect_to_peer(beacon: &PeerBeacon) -> Result<TcpStream, String> {
+    const TIMEOUT: Duration = Duration::from_secs(5);
     let addresses = (beacon.host.as_str(), beacon.port)
         .to_socket_addrs()
         .map_err(|error| format!("Cannot resolve peer address: {error}"))?
@@ -594,23 +798,38 @@ fn connect_to_peer(beacon: &PeerBeacon) -> Result<TcpStream, String> {
     if addresses.is_empty() {
         return Err("Peer address did not resolve on the local network".into());
     }
+    let (sender, receiver) = mpsc::channel();
+    for address in &addresses {
+        let address = *address;
+        let sender = sender.clone();
+        let _ = thread::Builder::new()
+            .name("alverchat-connect".into())
+            .spawn(move || {
+                let _ = sender.send((address, TcpStream::connect_timeout(&address, TIMEOUT)));
+            });
+    }
+    drop(sender);
+    let deadline = Instant::now() + TIMEOUT;
     let mut last_error = None;
-    for address in addresses {
-        match TcpStream::connect_timeout(&address, Duration::from_secs(5)) {
-            Ok(stream) => {
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match receiver.recv_timeout(remaining) {
+            Ok((_, Ok(stream))) => {
                 stream
                     .set_nodelay(true)
                     .map_err(|error| error.to_string())?;
                 return Ok(stream);
             }
-            Err(error) => last_error = Some(error),
+            Ok((address, Err(error))) => last_error = Some(format!("{address}: {error}")),
+            Err(_) => break,
         }
     }
     Err(format!(
         "Cannot connect to peer on the local network: {}",
-        last_error
-            .map(|error| error.to_string())
-            .unwrap_or_else(|| "no usable address".into())
+        last_error.unwrap_or_else(|| "no usable address".into())
     ))
 }
 
@@ -620,11 +839,20 @@ fn deliver_envelope(
     envelope: &Envelope<Value>,
 ) -> Result<(), String> {
     send_frame(app, beacon, envelope)?;
-    app.state::<OverlayState>()
+    let state = app.state::<OverlayState>();
+    let mut store = state
         .store
         .lock()
-        .map_err(|_| "message store lock poisoned")?
-        .acknowledge_outbox(envelope.id)?;
+        .map_err(|_| "message store lock poisoned")?;
+    // A group fan-out row is keyed by (message id, recipient); a direct row uses the
+    // message id itself. Try the derived id first and fall back to the plain one.
+    if !store.acknowledge_outbox(alver_core::groups::derive_outbox_id(
+        envelope.id,
+        &beacon.peer_id,
+    ))? {
+        store.acknowledge_outbox(envelope.id)?;
+    }
+    drop(store);
     let _ = app.emit("messages-changed", envelope.to.clone());
     Ok(())
 }
@@ -645,7 +873,8 @@ pub(crate) fn open_session(
     };
     let stream = connect_to_peer(beacon)?;
     let stream = websocket::connect(stream, &expected.peer_id, expected.public_key)?;
-    let session = initiator_handshake(stream, &state.identity, &expected)?;
+    let mut session = initiator_handshake(stream, &state.identity, &expected)?;
+    authenticate_session(app, &mut session, &expected.peer_id)?;
     state
         .store
         .lock()
@@ -655,15 +884,46 @@ pub(crate) fn open_session(
 }
 
 /// Handshakes with one beacon, sends a single frame and waits for its receipt.
+///
+/// The dialed session is kept warm between frames: a chat message, a typing flag and a
+/// reaction would otherwise each pay a fresh resolve, TCP connect and TLS handshake.
 pub(crate) fn send_frame(
     app: &AppHandle,
     beacon: &PeerBeacon,
     envelope: &Envelope<Value>,
 ) -> Result<(), String> {
+    match send_once(app, beacon, envelope) {
+        Ok(()) => Ok(()),
+        Err(first) => {
+            // A warm session can die with the peer or the network; redial exactly once.
+            forget_session(app, &beacon.peer_id);
+            send_once(app, beacon, envelope)
+                .map_err(|retry| format!("{first}; retry failed: {retry}"))
+        }
+    }
+}
+
+fn send_once(
+    app: &AppHandle,
+    beacon: &PeerBeacon,
+    envelope: &Envelope<Value>,
+) -> Result<(), String> {
+    let session = session_for(app, beacon)?;
+    let mut guard = session.lock().map_err(|_| "peer session lock poisoned")?;
+    guard.stream.send(envelope)?;
+    let receipt: Envelope<Value> = guard.stream.receive()?;
+    validate_receipt(app, beacon, envelope, &receipt)?;
+    guard.used = Instant::now();
+    Ok(())
+}
+
+fn validate_receipt(
+    app: &AppHandle,
+    beacon: &PeerBeacon,
+    envelope: &Envelope<Value>,
+    receipt: &Envelope<Value>,
+) -> Result<(), String> {
     let my_id = app.state::<OverlayState>().identity.peer_id();
-    let mut session = open_session(app, beacon)?;
-    session.send(envelope)?;
-    let receipt: Envelope<Value> = session.receive()?;
     let frame_id = envelope.id.to_string();
     if receipt.v != PROTOCOL_VERSION
         || receipt.kind != "receipt"
@@ -677,8 +937,67 @@ pub(crate) fn send_frame(
     Ok(())
 }
 
-fn start_outbox_retry(app: AppHandle, beacon: PeerBeacon) {
-    let peer_id = beacon.peer_id.clone();
+/// The warm session for `beacon`, dialing a new one when none is cached or the cached
+/// one has been idle long enough that the responder may already have closed its side.
+fn session_for(
+    app: &AppHandle,
+    beacon: &PeerBeacon,
+) -> Result<Arc<Mutex<OutboundSession>>, String> {
+    let state = app.state::<OverlayState>();
+    let cached = state
+        .outbound
+        .lock()
+        .map_err(|_| "peer session lock poisoned")?
+        .get(&beacon.peer_id)
+        .cloned();
+    if let Some(session) = cached {
+        let warm = session
+            .lock()
+            .map_err(|_| "peer session lock poisoned")?
+            .used
+            .elapsed()
+            < OUTBOUND_IDLE;
+        if warm {
+            return Ok(session);
+        }
+        forget_session(app, &beacon.peer_id);
+    }
+    let stream = open_session(app, beacon)?;
+    let session = Arc::new(Mutex::new(OutboundSession {
+        stream,
+        used: Instant::now(),
+    }));
+    let mut outbound = state
+        .outbound
+        .lock()
+        .map_err(|_| "peer session lock poisoned")?;
+    match outbound.entry(beacon.peer_id.clone()) {
+        Entry::Occupied(existing) => Ok(existing.get().clone()),
+        Entry::Vacant(slot) => {
+            slot.insert(session.clone());
+            Ok(session)
+        }
+    }
+}
+
+fn forget_session(app: &AppHandle, peer_id: &str) {
+    if let Ok(mut outbound) = app.state::<OverlayState>().outbound.lock() {
+        outbound.remove(peer_id);
+    }
+}
+
+/// The LAN passphrase changed, so no warm session may keep carrying traffic:
+/// dropping the cache forces a fresh handshake, and the epoch bump ends the
+/// inbound sessions that were already open.
+pub(crate) fn reset_authenticated_sessions(app: &AppHandle) {
+    let state = app.state::<OverlayState>();
+    state.auth_epoch.fetch_add(1, Ordering::AcqRel);
+    if let Ok(mut outbound) = state.outbound.lock() {
+        outbound.clear();
+    };
+}
+
+pub(crate) fn start_outbox_retry(app: AppHandle, peer_id: String) {
     let state = app.state::<OverlayState>();
     let Ok(mut retrying) = state.retrying_peers.lock() else {
         return;
@@ -711,11 +1030,21 @@ fn start_outbox_retry(app: AppHandle, beacon: PeerBeacon) {
                     .ok()
                     .and_then(|endpoints| endpoints.get(&peer_id).cloned())
                 else {
-                    break;
+                    // Discovery can lag behind a send (the peer was cached, or its
+                    // service is being re-resolved), so wait rather than giving up.
+                    thread::sleep(Duration::from_secs(delay));
+                    delay = (delay * 2).min(60);
+                    continue;
                 };
                 let mut failed = false;
                 for envelope in pending {
-                    if deliver_envelope(&app, &beacon, &envelope).is_err() {
+                    if let Err(error) = deliver_envelope(&app, &beacon, &envelope) {
+                        // A retry loop that fails in silence leaves a bubble spinning with
+                        // nothing on disk to explain it, so every failed round says why.
+                        eprintln!(
+                            "Outbox delivery of {} to {} failed: {error}",
+                            envelope.kind, peer_id
+                        );
                         failed = true;
                         break;
                     }
@@ -813,7 +1142,7 @@ fn start_peer_discovery(
                     discovered_services
                         .insert(service.get_fullname().to_owned(), beacon.peer_id.clone());
                     upsert_discovered_peer(&app, beacon.clone());
-                    start_outbox_retry(app.clone(), beacon);
+                    start_outbox_retry(app.clone(), beacon.peer_id);
                 }
                 Ok(ServiceEvent::ServiceRemoved(fullname, _)) => {
                     if let Some(peer_id) = discovered_services.remove(&fullname) {
@@ -1904,12 +2233,15 @@ fn main() {
                 compact_open: Mutex::new(false),
                 peers: Mutex::new(initial_peers),
                 endpoints: Mutex::new(HashMap::new()),
+                outbound: Mutex::new(HashMap::new()),
                 retrying_peers: Mutex::new(HashSet::new()),
                 typing_until: Mutex::new(HashMap::new()),
                 transfers: Mutex::new(HashMap::new()),
                 pulling: Mutex::new(HashSet::new()),
                 identity: identity.clone(),
                 peer_sessions: Arc::new(AtomicUsize::new(0)),
+                lan_passphrase: Mutex::new(None),
+                auth_epoch: AtomicU64::new(0),
                 store: Mutex::new(store),
                 preferences: Mutex::new(preferences),
                 preferences_path,
@@ -2088,6 +2420,7 @@ fn main() {
             commands::send_announcement,
             commands::acknowledge_announcement,
             commands::list_calls,
+            calls::send_call_signal,
             commands::set_avatar,
             commands::get_avatar
         ])

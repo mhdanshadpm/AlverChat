@@ -298,12 +298,66 @@ impl Store {
         {
             return Err("outgoing message and transport envelope do not match".into());
         }
+        let envelope_bytes = serde_json::to_vec(envelope).map_err(|error| error.to_string())?;
+        let transaction = self.connection.transaction().map_err(|e| e.to_string())?;
+        Self::write_outgoing_message(&transaction, message, reply_to)?;
+        transaction
+            .execute(
+                "INSERT INTO outbox(id, peer_id, envelope) VALUES (?1, ?2, ?3) ON CONFLICT(id) DO NOTHING",
+                params![envelope.id.to_string(), peer_id, envelope_bytes],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())
+    }
+
+    /// Atomically persists one group message and one outbox row per recipient.
+    ///
+    /// The message keeps a single id, while every recipient gets its own transport
+    /// envelope (with `to` naming that peer) and a deterministic outbox row id. Rows are
+    /// only skipped when the same recipient was already queued for the same message.
+    pub fn enqueue_group_message(
+        &mut self,
+        message: &Message,
+        deliveries: &[(String, Envelope<serde_json::Value>)],
+        reply_to: Option<Uuid>,
+    ) -> Result<(), String> {
+        if message.body.is_empty() || message.body.len() > 16_384 {
+            return Err("outgoing group message is empty or too large".into());
+        }
+        for (recipient, envelope) in deliveries {
+            if recipient.is_empty()
+                || envelope.id != message.id
+                || &envelope.to != recipient
+                || envelope.kind != "message"
+            {
+                return Err("group delivery does not match its message".into());
+            }
+        }
+        let transaction = self.connection.transaction().map_err(|e| e.to_string())?;
+        Self::write_outgoing_message(&transaction, message, reply_to)?;
+        for (recipient, envelope) in deliveries {
+            let row_id = crate::groups::derive_outbox_id(envelope.id, recipient);
+            let envelope_bytes = serde_json::to_vec(envelope).map_err(|error| error.to_string())?;
+            transaction
+                .execute(
+                    "INSERT INTO outbox(id, peer_id, envelope) VALUES (?1, ?2, ?3) ON CONFLICT(id) DO NOTHING",
+                    params![row_id.to_string(), recipient, envelope_bytes],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        transaction.commit().map_err(|error| error.to_string())
+    }
+
+    fn write_outgoing_message(
+        transaction: &rusqlite::Transaction,
+        message: &Message,
+        reply_to: Option<Uuid>,
+    ) -> Result<(), String> {
         if let Some(quoted) = reply_to {
             if quoted == message.id {
                 return Err("a message cannot quote itself".into());
             }
-            let quoted_chat: Option<String> = self
-                .connection
+            let quoted_chat: Option<String> = transaction
                 .query_row(
                     "SELECT chat_id FROM messages WHERE id = ?1",
                     params![quoted.to_string()],
@@ -315,8 +369,6 @@ impl Store {
                 return Err("a reply must quote a message from the same chat".into());
             }
         }
-        let envelope_bytes = serde_json::to_vec(envelope).map_err(|error| error.to_string())?;
-        let transaction = self.connection.transaction().map_err(|e| e.to_string())?;
         transaction
             .execute(
                 "INSERT INTO chats(id, name) VALUES (?1, ?1) ON CONFLICT(id) DO NOTHING",
@@ -347,13 +399,7 @@ impl Store {
                 )
                 .map_err(|error| error.to_string())?;
         }
-        transaction
-            .execute(
-                "INSERT INTO outbox(id, peer_id, envelope) VALUES (?1, ?2, ?3) ON CONFLICT(id) DO NOTHING",
-                params![envelope.id.to_string(), peer_id, envelope_bytes],
-            )
-            .map_err(|error| error.to_string())?;
-        transaction.commit().map_err(|error| error.to_string())
+        Ok(())
     }
 
     /// Records the message a stored message quotes; `None` clears the quote.
@@ -961,6 +1007,62 @@ mod tests {
         assert_eq!(store.pending_outbox(&peer).unwrap(), vec![envelope.clone()]);
         assert!(store.acknowledge_outbox(message.id).unwrap());
         assert!(!store.is_message_pending(message.id).unwrap());
+    }
+
+    #[test]
+    fn group_fan_out_stores_one_message_and_one_outbox_row_per_member() {
+        let group_id = "group-fanout";
+        let message = Message {
+            id: Uuid::now_v7(),
+            chat_id: group_id.into(),
+            sender: "local".into(),
+            body: "hello group".into(),
+            clock: Hlc {
+                physical_ms: 19,
+                logical: 0,
+            },
+            tombstone: false,
+        };
+        let deliveries: Vec<_> = ["peer-a", "peer-b"]
+            .into_iter()
+            .map(|recipient| {
+                (
+                    recipient.to_owned(),
+                    Envelope {
+                        v: crate::PROTOCOL_VERSION,
+                        id: message.id,
+                        kind: "message".into(),
+                        from: "me".into(),
+                        to: recipient.to_owned(),
+                        hlc: message.clock,
+                        payload: serde_json::json!({"text": "hello group", "chat_id": group_id}),
+                    },
+                )
+            })
+            .collect();
+        let mut store = Store::open(":memory:", &[40; 32]).unwrap();
+        store
+            .enqueue_group_message(&message, &deliveries, None)
+            .unwrap();
+        assert_eq!(
+            store.messages_for_chat(group_id).unwrap(),
+            vec![message.clone()]
+        );
+        assert_eq!(
+            store.pending_outbox("peer-a").unwrap(),
+            vec![deliveries[0].1.clone()]
+        );
+        assert_eq!(
+            store.pending_outbox("peer-b").unwrap(),
+            vec![deliveries[1].1.clone()]
+        );
+        // Every recipient row has its own id so one receipt cannot clear another's row.
+        let first = crate::groups::derive_outbox_id(message.id, "peer-a");
+        let second = crate::groups::derive_outbox_id(message.id, "peer-b");
+        assert_ne!(first, second);
+        assert!(store.acknowledge_outbox(first).unwrap());
+        assert!(store.pending_outbox("peer-a").unwrap().is_empty());
+        assert_eq!(store.pending_outbox("peer-b").unwrap().len(), 1);
     }
 
     #[test]

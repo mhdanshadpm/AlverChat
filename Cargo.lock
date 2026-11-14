@@ -112,6 +112,7 @@ version = "0.1.2"
 dependencies = [
  "alver-core",
  "base64 0.22.1",
+ "blake3",
  "chrono",
  "ed25519-dalek",
  "futures-util",

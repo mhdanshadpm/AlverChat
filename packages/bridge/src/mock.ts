@@ -402,6 +402,7 @@ export const mockBridge: PlatformBridge = {
     return delay(hit);
   },
   listCalls: (chatId) => delay(chatId ? CALLS.filter(call => call.chatId === chatId) : [...CALLS]),
+  sendCallSignal: () => delay(undefined),
   setMutedChat: (chatId, muted) => { peers = peers.map(peer => (peer.id === chatId ? { ...peer, muted } : peer)); settings = { ...settings, mutedChats: muted ? [...new Set([...settings.mutedChats, chatId])] : settings.mutedChats.filter(id => id !== chatId) }; return delay(settings.mutedChats); },
   setPinnedChat: (chatId, pinned) => { peers = peers.map(peer => (peer.id === chatId ? { ...peer, pinned } : peer)); settings = { ...settings, pinnedChats: pinned ? [chatId, ...settings.pinnedChats.filter(id => id !== chatId)] : settings.pinnedChats.filter(id => id !== chatId) }; return delay(settings.pinnedChats); },
   listGroups: () => delay(groups),

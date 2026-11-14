@@ -34,7 +34,10 @@
       "dmg"
     ],
     "category": "SocialNetworking",
-    "createUpdaterArtifacts": true
+    "createUpdaterArtifacts": true,
+    "macOS": {
+      "entitlements": "entitlements.plist"
+    }
   },
   "plugins": {
     "updater": {

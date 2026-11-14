@@ -71,7 +71,7 @@ function searchShortcut(): string {
     : text('searchShortcutWin', 'Ctrl K');
 }
 
-export function PeopleScreen({ bridge, go, toast, settings, peers: shellPeers }: ScreenProps) {
+export function PeopleScreen({ bridge, go, toast, settings, peers: shellPeers, onCall: dialOut }: ScreenProps) {
   const [people, setPeople] = useState<Peer[]>([]);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState('');
@@ -146,11 +146,13 @@ export function PeopleScreen({ bridge, go, toast, settings, peers: shellPeers }:
    */
   const onCall = useCallback(
     (peer: Peer, kind: 'voice' | 'video') => {
-      void peer;
-      void kind;
-      toast(text('callsPhase6', 'Calls land in phase 6.'), 'neutral');
+      if (!dialOut) {
+        toast(text('callsUnavailable', 'Calls are unavailable on this device.'), 'neutral');
+        return;
+      }
+      dialOut(peer.id, kind === 'voice' ? 'audio' : 'video');
     },
-    [toast],
+    [dialOut, toast],
   );
 
   const onMute = useCallback(

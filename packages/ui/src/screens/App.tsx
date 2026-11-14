@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { APP_NAME, type Announcement, type AppSettings, type Peer } from '../../../bridge/src';
+import { APP_NAME, type Announcement, type AppSettings, type Group, type IncomingCallSignal, type Peer } from '../../../bridge/src';
 import { Avatar, Button, EmptyState, Icon, ToastViewport, cx, initialsFor, type IconName, type ToastView } from '../components';
+import { CallOverlay } from '../calls/CallOverlay';
+import { useCall } from '../calls/useCall';
 import { announcementView, loadPendingAnnouncements } from '../announcements';
+import { groupPeer, summaryOf, type GroupThread } from '../groupChats';
 import { ns, registerNamespace } from '../i18n';
 import shellCatalog from '../i18n/en/shell';
 import { CallsScreen } from './CallsScreen';
@@ -48,6 +51,8 @@ export default function App() {
   const [systemDark, setSystemDark] = useState(prefersDark);
   const [announcements, setAnnouncements] = useState<readonly Announcement[]>([]);
   const [announcementTick, setAnnouncementTick] = useState(0);
+  const [groups, setGroups] = useState<Group[]>([]);
+  const [groupThreads, setGroupThreads] = useState<Record<string, GroupThread>>({});
   const searchRef = useRef<HTMLInputElement>(null);
   const activeRef = useRef<string | null>(null);
   activeRef.current = activeChat;
@@ -55,6 +60,8 @@ export default function App() {
   const toast = useCallback((message: string, tone: ToastTone = 'neutral') => {
     setToasts(current => [...current.slice(-2), { id: `${Date.now()}-${Math.random()}`, message, tone }]);
   }, []);
+
+  const callController = useCall(bridge, settings, toast);
 
   const go = useCallback((next: View, chatId?: string) => {
     setView(next);
@@ -152,10 +159,64 @@ export default function App() {
     };
   }, [announcementTick, bridge, identity?.peerId, ready, revision]);
 
+  /* Groups live beside discovered peers in the chat rail, with a thread summary. */
+  useEffect(() => {
+    if (!ready) return;
+    let live = true;
+    void bridge.listGroups()
+      .then(list => { if (live) setGroups(list); })
+      .catch(() => undefined);
+    return () => { live = false; };
+  }, [bridge, ready, revision]);
+
+  useEffect(() => {
+    if (groups.length === 0) {
+      setGroupThreads({});
+      return;
+    }
+    let live = true;
+    void Promise.all(groups.map(async (group) => {
+      try {
+        return [group.id, summaryOf(await bridge.listMessages(group.id))] as const;
+      } catch {
+        return [group.id, { preview: '', time: '', unread: 0 }] as const;
+      }
+    })).then((entries) => {
+      if (live) setGroupThreads(Object.fromEntries(entries));
+    });
+    return () => { live = false; };
+  }, [bridge, groups, revision]);
+
+  const chatPeers = useMemo(() => {
+    const known = new Set(peers.map(peer => peer.id));
+    return [
+      ...peers,
+      ...groups.filter(group => !known.has(group.id)).map(group => groupPeer(group, groupThreads[group.id])),
+    ];
+  }, [groupThreads, groups, peers]);
+
   const nameOf = useCallback(
-    (id: string) => peers.find((peer) => peer.id === id)?.name ?? id,
-    [peers],
+    (id: string) => chatPeers.find((peer) => peer.id === id)?.name ?? id,
+    [chatPeers],
   );
+
+  /* Call signalling arrives on the peer session and is answered by the call engine. */
+  const handleCallSignal = callController.handleSignal;
+  useEffect(() => {
+    if (!isTauri()) return;
+    let alive = true;
+    let stop: (() => void) | null = null;
+    void listen<IncomingCallSignal>('call-signal', event => {
+      if (alive) void handleCallSignal(event.payload, nameOf(event.payload.chatId));
+    }).then(unlisten => {
+      if (alive) stop = unlisten;
+      else unlisten();
+    });
+    return () => {
+      alive = false;
+      stop?.();
+    };
+  }, [handleCallSignal, nameOf]);
 
   function acknowledge(item: Announcement) {
     void bridge
@@ -233,8 +294,8 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
-  const chat = useMemo(() => peers.find(peer => peer.id === activeChat) ?? null, [peers, activeChat]);
-  const unreadTotal = peers.reduce((total, peer) => total + (peer.unread ?? 0), 0);
+  const chat = useMemo(() => chatPeers.find(peer => peer.id === activeChat) ?? null, [chatPeers, activeChat]);
+  const unreadTotal = chatPeers.reduce((total, peer) => total + (peer.unread ?? 0), 0);
   const online = peers.filter(peer => peer.online).length;
 
   const props: ScreenProps = {
@@ -247,7 +308,12 @@ export default function App() {
     settings,
     patchSettings,
     refreshAnnouncements: () => setAnnouncementTick((tick) => tick + 1),
+    refreshKey: revision,
     identity,
+    onCall: (chatId, media) => {
+      const peer = chatPeers.find((entry) => entry.id === chatId);
+      void callController.start(chatId, media, peer?.name ?? chatId);
+    },
   };
 
   return (
@@ -313,7 +379,7 @@ export default function App() {
                   setActiveChat(id);
                   setMobileChat(true);
                 }}
-                peers={peers}
+                peers={chatPeers}
                 searchRef={searchRef}
                 settings={settings}
                 toast={toast}
@@ -326,7 +392,7 @@ export default function App() {
                   key={chat.id}
                   myId={identity?.peerId ?? 'me'}
                   onBack={() => setMobileChat(false)}
-                  onCall={() => toast(text('callUnavailable', 'Calls are unavailable until LAN call signaling is connected.'))}
+                  onCall={kind => props.onCall?.(chat.id, kind === 'voice' ? 'audio' : 'video')}
                   onToggleDetails={setDetailsOpen}
                   peers={peers}
                   peer={chat}
@@ -382,6 +448,7 @@ export default function App() {
         </div>
       </div>
 
+      <CallOverlay controller={callController} settings={settings} />
       <ToastViewport onDismiss={id => setToasts(current => current.filter(entry => entry.id !== id))} toasts={toasts} />
     </main>
   );

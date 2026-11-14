@@ -7,6 +7,7 @@
 
 use chrono::{Local, TimeZone};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager};
@@ -384,8 +385,22 @@ pub fn get_settings(state: tauri::State<'_, SettingsState>) -> AppSettings {
     state.snapshot()
 }
 
+/// Overlays a partial update on the stored settings.
+///
+/// The UI sends only the fields it changed; treating that object as complete
+/// would reset every other preference to its default.
+fn merge_settings(current: &AppSettings, patch: &Value) -> Result<AppSettings, String> {
+    let mut merged = serde_json::to_value(current).map_err(|error| error.to_string())?;
+    if let (Some(base), Some(patch)) = (merged.as_object_mut(), patch.as_object()) {
+        for (key, value) in patch {
+            base.insert(key.clone(), value.clone());
+        }
+    }
+    serde_json::from_value(merged).map_err(|error| format!("Invalid settings update: {error}"))
+}
+
 #[tauri::command]
-pub fn update_settings(app: AppHandle, patch: AppSettings) -> Result<AppSettings, String> {
+pub fn update_settings(app: AppHandle, patch: Value) -> Result<AppSettings, String> {
     let state = app.state::<SettingsState>();
     let previous = state.snapshot();
     {
@@ -393,7 +408,7 @@ pub fn update_settings(app: AppHandle, patch: AppSettings) -> Result<AppSettings
             .0
             .lock()
             .map_err(|_| "settings lock poisoned".to_string())?;
-        *guard = patch;
+        *guard = merge_settings(&guard, &patch)?;
     }
     let current = state.snapshot();
     persist(&app, &current)?;
@@ -471,6 +486,8 @@ pub fn set_lan_passphrase(app: AppHandle, passphrase: String) -> Result<bool, St
         .map_err(|_| "settings lock poisoned".to_string())?;
     guard.lan_encryption = !passphrase.is_empty();
     persist(&app, &guard)?;
+    crate::forget_lan_passphrase(&app);
+    crate::reset_authenticated_sessions(&app);
     Ok(!passphrase.is_empty())
 }
 
@@ -888,6 +905,19 @@ mod tests {
         assert_eq!(minutes_of_day("22:30"), Some(1350));
         assert_eq!(minutes_of_day("24:00"), None);
         assert_eq!(minutes_of_day("7pm"), None);
+    }
+
+    #[test]
+    fn partial_update_keeps_the_other_settings() {
+        let current = AppSettings {
+            display_name: "Anu".into(),
+            theme: "dark".into(),
+            ..Default::default()
+        };
+        let merged = merge_settings(&current, &serde_json::json!({"theme": "light"})).unwrap();
+        assert_eq!(merged.theme, "light");
+        assert_eq!(merged.display_name, "Anu");
+        assert!(merge_settings(&current, &serde_json::json!({"opacityPercent": 500})).is_err());
     }
 
     #[test]

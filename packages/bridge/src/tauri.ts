@@ -82,6 +82,7 @@ export const tauriBridge: PlatformBridge = {
   sendAnnouncement: (groupId, text) => invoke<Announcement>('send_announcement', { groupId, text }),
   acknowledgeAnnouncement: (announcementId) => invoke<Announcement | null>('acknowledge_announcement', { announcementId }),
   listCalls: (chatId) => invoke<CallEvent[]>('list_calls', { chatId }),
+  sendCallSignal: (chatId, signal) => invoke<void>('send_call_signal', { chatId, signal }),
   setMutedChat: (chatId, muted) => invoke<string[]>('set_muted_chat', { chatId, muted }),
   setPinnedChat: (chatId, pinned) => invoke<string[]>('set_pinned_chat', { chatId, pinned }),
   listGroups: () => invoke<Group[]>('list_groups'),

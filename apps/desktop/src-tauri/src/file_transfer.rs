@@ -471,8 +471,9 @@ pub(crate) fn handle_offer(
     envelope: &Envelope<Value>,
 ) -> Result<Vec<Envelope<Value>>, String> {
     let offer: FileOfferPayload = payload(envelope)?;
-    if offer.chat_id != remote {
-        return Err("peer offered a file that is not theirs".into());
+    // `chat_id` is the receiver the sender addressed, so it must name this device.
+    if offer.chat_id != my_id(app) {
+        return Err("peer offered a file that is not addressed to this device".into());
     }
     let Ok(blake3_hash) = <[u8; 32]>::try_from(offer.blake3_hash.as_slice()) else {
         return Err("peer offered a file without a blake3 hash".into());
@@ -722,6 +723,10 @@ fn reoffer(app: &AppHandle, attachment: &Attachment) -> Result<(), String> {
     set_state(app, attachment.id, TransferState::Accepted)?;
     if let Ok(beacon) = endpoint(app, &chat_id) {
         commands::flush_outbox(app, &chat_id, &beacon);
+    } else {
+        // The peer may still come back, so keep the offer queued and let the retry loop
+        // deliver it as soon as discovery finds an address.
+        crate::start_outbox_retry(app.clone(), chat_id);
     }
     Ok(())
 }

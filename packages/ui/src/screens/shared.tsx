@@ -19,7 +19,11 @@ export type ScreenProps = {
   patchSettings: (patch: Partial<AppSettings>) => void;
   /** Call after announcement storage changes, so the shell re-reads its banner. */
   refreshAnnouncements?: () => void;
+  /** Bumped whenever stored traffic changes, so screens caching a list can re-read it. */
+  refreshKey?: number;
   identity: { peerId: string; fingerprint: string } | null;
+  /** Starts a 1-to-1 call; the shell owns media and signalling. */
+  onCall?: (chatId: string, media: 'audio' | 'video') => void;
 };
 
 /** Opens on the profile step when the display name has never been set. */

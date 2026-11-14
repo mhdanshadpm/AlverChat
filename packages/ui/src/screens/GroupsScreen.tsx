@@ -1263,7 +1263,7 @@ export function GroupInfoPanel({
  * ========================================================================== */
 
 export function GroupsScreen(props: ScreenProps) {
-  const { bridge, peers, settings, identity, toast, go, refreshAnnouncements } = props;
+  const { bridge, peers, settings, identity, toast, go, refreshAnnouncements, refreshKey = 0 } = props;
   const [groups, setGroups] = useState<readonly Group[] | null>(null);
   const [layout, setLayout] = useState<'grid' | 'list'>('grid');
   const [query, setQuery] = useState('');
@@ -1339,7 +1339,7 @@ export function GroupsScreen(props: ScreenProps) {
     return () => {
       live = false;
     };
-  }, [bridge, selected]);
+  }, [bridge, refreshKey, selected]);
 
   const applyGroup = useCallback((next: Group) => {
     setGroups((current) => {

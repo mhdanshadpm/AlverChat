@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { listen } from '@tauri-apps/api/event';
 import type { CallEvent, CallStatus } from '../../../bridge/src';
 import { Avatar, EmptyState, Icon, IconButton, ListRow, Segmented, cx, formatDuration, initialsFor } from '../components';
 import { ns, registerNamespace } from '../i18n';
@@ -33,7 +34,7 @@ function stampOf(ms: number): string {
     : at.toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
 
-export function CallsScreen({ bridge, peers, go, toast, identity }: ScreenProps) {
+export function CallsScreen({ bridge, peers, go, toast, identity, onCall }: ScreenProps) {
   const [calls, setCalls] = useState<readonly CallEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<CallFilter>('all');
@@ -51,6 +52,24 @@ export function CallsScreen({ bridge, peers, go, toast, identity }: ScreenProps)
 
   useEffect(() => {
     void load();
+  }, [load]);
+
+  /* A call that just ended must reach the history without a manual reload. */
+  useEffect(() => {
+    const tauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+    if (!tauri) return;
+    let alive = true;
+    let stop: (() => void) | null = null;
+    void listen('calls-changed', () => {
+      if (alive) void load();
+    }).then(unlisten => {
+      if (alive) stop = unlisten;
+      else unlisten();
+    });
+    return () => {
+      alive = false;
+      stop?.();
+    };
   }, [load]);
 
   const visible = useMemo(
@@ -75,13 +94,21 @@ export function CallsScreen({ bridge, peers, go, toast, identity }: ScreenProps)
     [peers],
   );
 
-  const startCall = useCallback(() => {
-    if (!peers.some(peer => peer.online && !peer.group)) {
-      toast(text('callNoPeer', 'No online peer to call yet.'), 'danger');
-      return;
-    }
-    toast(text('callUnavailable', 'Calls are unavailable until LAN call signaling is connected.'));
-  }, [peers, toast]);
+  const startCall = useCallback(
+    (media: 'audio' | 'video') => {
+      const target = peers.find(peer => peer.online && !peer.group);
+      if (!target) {
+        toast(text('callNoPeer', 'No online peer to call yet.'), 'danger');
+        return;
+      }
+      if (!onCall) {
+        toast(text('callUnavailable', 'Calls need the desktop app.'), 'danger');
+        return;
+      }
+      onCall(target.id, media);
+    },
+    [onCall, peers, toast],
+  );
 
   return (
     <div className={cx('ac-calls')}>
@@ -90,7 +117,7 @@ export function CallsScreen({ bridge, peers, go, toast, identity }: ScreenProps)
         title={text('callsTitle', 'Calls')}
         description={text(
           'callsBody',
-          'Voice and video over the local network land in phase 6. Until then calls are listed here but cannot be placed.',
+          'Voice, video and screen sharing run directly between the two peers on your local network. No server carries the media.',
         )}
       />
 
@@ -101,11 +128,11 @@ export function CallsScreen({ bridge, peers, go, toast, identity }: ScreenProps)
         <h3>{text('callStart', 'Start a call')}</h3>
         <p>{text('callStartBody', 'Calls stay on your local network — no server ever carries the audio.')}</p>
         <div className="ac-calls__start-actions">
-          <button className="primary" onClick={startCall} type="button">
+          <button className="primary" onClick={() => startCall('audio')} type="button">
             <Icon name="phone" size={15} />
             {text('callVoice', 'Voice call')}
           </button>
-          <button className="soft-button" onClick={startCall} type="button">
+          <button className="soft-button" onClick={() => startCall('video')} type="button">
             <Icon name="video" size={15} />
             {text('callVideo', 'Video call')}
           </button>
@@ -168,7 +195,13 @@ export function CallsScreen({ bridge, peers, go, toast, identity }: ScreenProps)
                     iconSize={15}
                     label={text('callBack', 'Call back')}
                     name="phone"
-                    onClick={() => toast(text('callUnavailable', 'Calls are unavailable until LAN call signaling is connected.'))}
+                    onClick={() => {
+                      if (call.kind === 'group' || !onCall) {
+                        toast(text('callUnavailable', 'Calls are unavailable until LAN call signaling is connected.'), 'danger');
+                        return;
+                      }
+                      onCall(call.chatId, 'audio');
+                    }}
                     variant="soft"
                   />
                   <IconButton

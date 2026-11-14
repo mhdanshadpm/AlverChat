@@ -48,6 +48,20 @@ export type PinnedMessage = { messageId:string; chatId:string; sender:string; te
 export type Announcement = { id:string; groupId:string; author:string; authorName:string; text:string; createdMs:number; acknowledgedBy:string[] };
 export type CallStatus = 'missed'|'declined'|'ended'|'ringing'|'ongoing'|'failed';
 export type CallEvent = { id:string; chatId:string; kind:'1to1'|'group'; status:CallStatus; caller:string; callerName:string; startedMs:number; endedMs:number|null; participants:string[] };
+/** WebRTC signalling relayed over the encrypted peer session; SDP and ICE stay opaque. */
+export type CallSignal = {
+  callId:string;
+  kind:'offer'|'answer'|'ice'|'end'|'reject'|'busy';
+  /** `audio`, `video` or `screen`, present on an offer. */
+  media?:string;
+  sdp?:string;
+  candidate?:string;
+  sdpMid?:string|null;
+  sdpIndex?:number|null;
+  reason?:string|null;
+  accepted?:boolean;
+};
+export type IncomingCallSignal = { chatId:string; caller:string; signal:CallSignal };
 export type SearchHit = { chatId:string; chatName:string; messageId:string; sender:string; text:string; timestampMs:number };
 export type UnreadState = { chatId:string; unread:number; firstUnreadId:string|null };
 
@@ -169,6 +183,8 @@ export interface PlatformBridge {
   sendAnnouncement(groupId:string, text:string): Promise<Announcement>;
   acknowledgeAnnouncement(announcementId:string): Promise<Announcement|null>;
   listCalls(chatId?:string): Promise<CallEvent[]>;
+  /** Relays one WebRTC signalling frame to a peer over the encrypted session. */
+  sendCallSignal(chatId:string, signal:CallSignal): Promise<void>;
   setMutedChat(chatId:string,muted:boolean): Promise<string[]>;
   setPinnedChat(chatId:string,pinned:boolean): Promise<string[]>;
   listGroups(): Promise<Group[]>;
@@ -271,6 +287,7 @@ export const emptyBrowserBridge:PlatformBridge = {
  async sendAnnouncement(){return unavailable('Announcements')},
  async acknowledgeAnnouncement(){return null},
  async listCalls(){return []},
+ async sendCallSignal(){return unavailable('Calls')},
 };
 
 export async function bridgeForRuntime():Promise<PlatformBridge>{

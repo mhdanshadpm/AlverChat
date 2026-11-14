@@ -20,7 +20,7 @@ use alver_core::{Envelope, Hlc, Message, PROTOCOL_VERSION};
 use base64::Engine as _;
 use serde::Deserialize;
 use serde::Serialize;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_opener::OpenerExt;
 use uuid::Uuid;
@@ -294,11 +294,11 @@ pub(crate) fn message_dtos(app: &AppHandle, chat_id: &str) -> Result<Vec<Message
     Ok(out)
 }
 
-/// Writes one outgoing message and tries to hand it to the peer that owns `chat_id`.
+/// Writes one outgoing message and queues it for its recipients.
 ///
 /// A direct send fails loudly when the peer vanished, because the composer must not
-/// imply delivery. A group post has no single endpoint yet, so its outbox rows stay
-/// pending until group fan-out is connected.
+/// imply delivery. A group post is stored once under the group id and queued as one
+/// outbox row per other member, so offline members receive it when discovery returns.
 fn outgoing(
     app: &AppHandle,
     chat_id: &str,
@@ -310,15 +310,34 @@ fn outgoing(
     if body.is_empty() || body.len() > MAX_BODY_BYTES {
         return Err(format!("Message must contain 1–{MAX_BODY_BYTES} bytes."));
     }
-    let beacon = app
-        .state::<OverlayState>()
-        .endpoints
-        .lock()
-        .map_err(|_| "peer endpoint lock poisoned")?
-        .get(chat_id)
-        .cloned();
-    if strict && beacon.is_none() {
-        return Err("This peer is no longer available on the local network.".into());
+    let my_id = my_peer_id(app);
+    let (group, roster, epoch) = {
+        let guard = store(app)?;
+        let group = is_group(&guard, chat_id);
+        let roster = if group {
+            roster_of(&guard, chat_id, &my_id)
+        } else {
+            Vec::new()
+        };
+        let epoch = guard
+            .get_group_state(chat_id)
+            .ok()
+            .flatten()
+            .map(|state| state.epoch)
+            .unwrap_or(1);
+        (group, roster, epoch)
+    };
+    if !group {
+        let beacon = app
+            .state::<OverlayState>()
+            .endpoints
+            .lock()
+            .map_err(|_| "peer endpoint lock poisoned")?
+            .get(chat_id)
+            .cloned();
+        if strict && beacon.is_none() {
+            return Err("This peer is no longer available on the local network.".into());
+        }
     }
     let message = Message {
         id: Uuid::now_v7(),
@@ -331,21 +350,75 @@ fn outgoing(
         },
         tombstone: false,
     };
-    let envelope = Envelope {
-        v: PROTOCOL_VERSION,
-        id: message.id,
-        kind: "message".into(),
-        from: my_peer_id(app),
-        to: chat_id.to_owned(),
-        hlc: message.clock,
-        payload: serde_json::json!({
-            "text": message.body,
-            "reply_to": reply_to.map(|id| id.to_string()),
-        }),
+    let frames = if group {
+        alver_core::groups::delivery_plan_for(&roster, &my_id, chat_id, epoch, message.id)
+            .into_iter()
+            .map(|target| {
+                (
+                    target.recipient.clone(),
+                    Envelope {
+                        v: PROTOCOL_VERSION,
+                        id: message.id,
+                        kind: "message".into(),
+                        from: my_id.clone(),
+                        to: target.recipient,
+                        hlc: message.clock,
+                        payload: serde_json::json!({
+                            "text": message.body,
+                            "reply_to": reply_to.map(|id| id.to_string()),
+                            "chat_id": chat_id,
+                        }),
+                    },
+                )
+            })
+            .collect::<Vec<_>>()
+    } else {
+        vec![(
+            chat_id.to_owned(),
+            Envelope {
+                v: PROTOCOL_VERSION,
+                id: message.id,
+                kind: "message".into(),
+                from: my_id.clone(),
+                to: chat_id.to_owned(),
+                hlc: message.clock,
+                payload: serde_json::json!({
+                    "text": message.body,
+                    "reply_to": reply_to.map(|id| id.to_string()),
+                    "chat_id": chat_id,
+                }),
+            },
+        )]
     };
-    store(app)?.enqueue_quoted_message(&message, chat_id, &envelope, reply_to)?;
-    if let Some(beacon) = beacon {
-        flush_outbox(app, chat_id, &beacon);
+    {
+        let mut guard = store(app)?;
+        if group {
+            guard.enqueue_group_message(&message, &frames, reply_to)?;
+        } else {
+            let (peer, envelope) = &frames[0];
+            guard.enqueue_quoted_message(&message, peer, envelope, reply_to)?;
+        }
+    }
+    // Every recipient with a live endpoint gets its own delivery thread; the outbox and
+    // its retry loop own everyone else, so the composer never waits for a handshake.
+    let endpoints = app
+        .state::<OverlayState>()
+        .endpoints
+        .lock()
+        .map(|map| map.clone())
+        .unwrap_or_default();
+    for (peer, _) in &frames {
+        let Some(beacon) = endpoints.get(peer).cloned() else {
+            if group {
+                start_outbox_retry(app.clone(), peer.clone());
+            }
+            continue;
+        };
+        let delivery_app = app.clone();
+        let delivery_peer = peer.clone();
+        let _ = std::thread::Builder::new()
+            .name("alverchat-delivery".into())
+            .spawn(move || flush_outbox(&delivery_app, &delivery_peer, &beacon));
     }
     if let Ok(mut peers) = app.state::<OverlayState>().peers.lock() {
         if let Some(peer) = peers.iter_mut().find(|peer| peer.id == chat_id) {
@@ -362,8 +435,8 @@ fn outgoing(
 
 /// Sends one composer message, quoting `reply_to_id` when the UI supplied one.
 ///
-/// Runs on a blocking thread: the caller is the async `send_message` command, and
-/// delivery is a synchronous round-trip to the peer.
+/// Runs on a blocking thread: the caller is the async `send_message` command, and the
+/// store write is what has to finish before the bubble can be listed.
 pub(crate) fn send_message(
     app: AppHandle,
     chat_id: String,
@@ -388,7 +461,7 @@ pub(crate) fn flush_outbox(app: &AppHandle, chat_id: &str, beacon: &PeerBeacon) 
     };
     for queued in pending {
         if deliver_envelope(app, beacon, &queued).is_err() {
-            start_outbox_retry(app.clone(), beacon.clone());
+            start_outbox_retry(app.clone(), beacon.peer_id.clone());
             return;
         }
     }
@@ -1200,7 +1273,10 @@ pub(crate) fn create_group(
         guard.set_setting(&key::icon(&state.id), &icon, now_ms())?;
     }
     guard.set_setting(&key::left(&state.id), &false, now_ms())?;
-    group_dto(&guard, &state, &my_id)
+    let dto = group_dto(&guard, &state, &my_id)?;
+    drop(guard);
+    deliver_group_state(&app, &state, &[]);
+    Ok(dto)
 }
 
 #[tauri::command]
@@ -1215,18 +1291,26 @@ pub(crate) fn update_group(
     let mut state = guard
         .get_group_state(&id)?
         .ok_or("That group does not exist on this device.")?;
+    let previous = state.members.clone();
     let name = patch.name.trim();
+    let mut roster_changed = false;
     if !name.is_empty() && name != state.name {
         state
             .rename(&identity(&app), name.to_owned())
             .map_err(|error| format!("Group rename refused: {error:?}"))?;
         guard.save_group_state(&state)?;
+        roster_changed = true;
     }
     guard.set_setting(&key::description(&id), &patch.description, now_ms())?;
     if let Some(icon) = patch.icon.filter(|value| !value.trim().is_empty()) {
         guard.set_setting(&key::icon(&id), &icon, now_ms())?;
     }
-    group_dto(&guard, &state, &my_id)
+    let dto = group_dto(&guard, &state, &my_id)?;
+    drop(guard);
+    if roster_changed {
+        deliver_group_state(&app, &state, &previous);
+    }
+    Ok(dto)
 }
 
 #[tauri::command]
@@ -1294,11 +1378,15 @@ fn roster_change(
     if members == state.members {
         return group_dto(&guard, &state, &my_id);
     }
+    let previous = state.members.clone();
     state
         .update_members(&identity(&app), members)
         .map_err(|error| format!("Roster change refused: {error:?}"))?;
     guard.save_group_state(&state)?;
-    group_dto(&guard, &state, &my_id)
+    let dto = group_dto(&guard, &state, &my_id)?;
+    drop(guard);
+    deliver_group_state(&app, &state, &previous);
+    Ok(dto)
 }
 
 #[tauri::command]
@@ -1380,7 +1468,10 @@ pub(crate) fn send_announcement(
     };
     guard.save_announcement(&announcement)?;
     let all = names(&app, &guard);
-    announcement_dto(&guard, &announcement, &all)
+    let dto = announcement_dto(&guard, &announcement, &all)?;
+    drop(guard);
+    deliver_announcement(&app, &announcement, &members);
+    Ok(dto)
 }
 
 #[tauri::command]
@@ -1403,7 +1494,281 @@ pub(crate) fn acknowledge_announcement(
         guard.acknowledge_announcement(id, &my_id, now_ms())?;
     }
     let all = names(&app, &guard);
-    announcement_dto(&guard, &announcement, &all).map(Some)
+    let dto = announcement_dto(&guard, &announcement, &all).map(Some)?;
+    drop(guard);
+    if !already && announcement.sender != my_id {
+        let envelope = Envelope {
+            v: PROTOCOL_VERSION,
+            id: Uuid::now_v7(),
+            kind: "announcement_ack".into(),
+            from: my_id.clone(),
+            to: announcement.sender.clone(),
+            hlc: Hlc {
+                physical_ms: now_ms(),
+                logical: 0,
+            },
+            payload: serde_json::json!({"announcement_id": id.to_string()}),
+        };
+        if let Ok(mut queued) = store(&app) {
+            let _ = queued.enqueue(&announcement.sender, &envelope);
+        }
+        deliver_to_peers(&app, std::slice::from_ref(&announcement.sender));
+    }
+    Ok(dto)
+}
+
+// ------------------------------------------------------------------------------------
+// Group and announcement transport.
+// ------------------------------------------------------------------------------------
+
+/// Roster, announcement and acknowledgement frames the peer session must accept.
+pub(crate) fn handled_kind(kind: &str) -> bool {
+    matches!(kind, "group" | "announcement" | "announcement_ack")
+}
+
+/// Fans a signed roster out to every member (and to peers the change removed).
+///
+/// Only the admin signs roster changes, so the frame's sender is always the admin and a
+/// receiver can bind the state's public key to the already-pinned session identity.
+fn deliver_group_state(app: &AppHandle, state: &GroupState, previous: &[String]) {
+    let my_id = my_peer_id(app);
+    let mut recipients: BTreeSet<String> = state.members.iter().cloned().collect();
+    recipients.extend(previous.iter().cloned());
+    recipients.remove(&my_id);
+    let Ok(payload) = serde_json::to_value(state) else {
+        return;
+    };
+    let stamp = now_ms();
+    let frames: Vec<(String, Envelope<serde_json::Value>)> = recipients
+        .into_iter()
+        .map(|to| {
+            (
+                to.clone(),
+                Envelope {
+                    v: PROTOCOL_VERSION,
+                    id: Uuid::now_v7(),
+                    kind: "group".into(),
+                    from: my_id.clone(),
+                    to,
+                    hlc: Hlc {
+                        physical_ms: stamp,
+                        logical: 0,
+                    },
+                    payload: payload.clone(),
+                },
+            )
+        })
+        .collect();
+    queue_frames(app, frames);
+}
+
+/// Queues one announcement frame per other member of its group roster.
+fn deliver_announcement(app: &AppHandle, announcement: &Announcement, members: &[String]) {
+    let my_id = my_peer_id(app);
+    let recipients: BTreeSet<String> = members
+        .iter()
+        .filter(|member| member.as_str() != my_id)
+        .cloned()
+        .collect();
+    let frames: Vec<(String, Envelope<serde_json::Value>)> = recipients
+        .into_iter()
+        .map(|to| {
+            (
+                to.clone(),
+                Envelope {
+                    v: PROTOCOL_VERSION,
+                    id: Uuid::now_v7(),
+                    kind: "announcement".into(),
+                    from: my_id.clone(),
+                    to,
+                    hlc: announcement.clock,
+                    payload: serde_json::json!({
+                        "announcement_id": announcement.id.to_string(),
+                        "group_id": announcement.group_id.clone(),
+                        "text": announcement.body.clone(),
+                        "created_ms": announcement.created_ms,
+                        "admins_only": announcement.admins_only,
+                    }),
+                },
+            )
+        })
+        .collect();
+    queue_frames(app, frames);
+}
+
+/// Persists frames first, then hands every recipient to a delivery thread.
+fn queue_frames(app: &AppHandle, frames: Vec<(String, Envelope<serde_json::Value>)>) {
+    if frames.is_empty() {
+        return;
+    }
+    if let Ok(mut guard) = store(app) {
+        for (recipient, envelope) in &frames {
+            if let Err(error) = guard.enqueue(recipient, envelope) {
+                eprintln!(
+                    "Queueing a {kind} frame failed: {error}",
+                    kind = envelope.kind
+                );
+            }
+        }
+    }
+    let recipients: Vec<String> = frames.into_iter().map(|(peer, _)| peer).collect();
+    deliver_to_peers(app, &recipients);
+}
+
+/// Starts one delivery attempt per peer; peers without an endpoint keep their retry loop.
+fn deliver_to_peers(app: &AppHandle, peers: &[String]) {
+    let endpoints = app
+        .state::<OverlayState>()
+        .endpoints
+        .lock()
+        .map(|map| map.clone())
+        .unwrap_or_default();
+    for peer in peers {
+        match endpoints.get(peer).cloned() {
+            Some(beacon) => {
+                let app = app.clone();
+                let peer = peer.clone();
+                let _ = std::thread::Builder::new()
+                    .name("alverchat-delivery".into())
+                    .spawn(move || flush_outbox(&app, &peer, &beacon));
+            }
+            None => start_outbox_retry(app.clone(), peer.clone()),
+        }
+    }
+}
+
+/// Accepts a roster delivered by its own admin.
+pub(crate) fn handle_group_frame(
+    app: &AppHandle,
+    remote: &str,
+    envelope: &Envelope<serde_json::Value>,
+) -> Result<(), String> {
+    let state: GroupState = serde_json::from_value(envelope.payload.clone())
+        .map_err(|error| format!("group frame is malformed: {error}"))?;
+    if !state.verify() {
+        return Err("group frame carries an invalid signature".into());
+    }
+    if state.admin != remote {
+        return Err("group frames must come from the group admin".into());
+    }
+    if state.id == EVERYONE_GROUP_ID {
+        return Err("the automatic Everyone roster cannot be replaced".into());
+    }
+    let my_id = my_peer_id(app);
+    let mut guard = store(app)?;
+    let accepted = match guard.get_group_state(&state.id)? {
+        Some(previous) if previous == state => false,
+        Some(previous) => {
+            if !state.verify_successor_of(&previous) {
+                return Err("group update is stale or skips an epoch".into());
+            }
+            guard.save_group_state(&state)?;
+            true
+        }
+        None => {
+            guard.save_group_state(&state)?;
+            true
+        }
+    };
+    if accepted {
+        // A frame that drops this device from the roster removes the group from the rail;
+        // an epoch that adds us back clears the flag again.
+        guard.set_setting(&key::left(&state.id), &!state.is_member(&my_id), now_ms())?;
+        drop(guard);
+        let _ = app.emit("messages-changed", state.id.clone());
+    }
+    Ok(())
+}
+
+/// Accepts an announcement from a member authorised under the group's roster.
+pub(crate) fn handle_announcement_frame(
+    app: &AppHandle,
+    remote: &str,
+    envelope: &Envelope<serde_json::Value>,
+) -> Result<(), String> {
+    let announcement_id = envelope
+        .payload
+        .get("announcement_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("announcement frame has no id")?;
+    let group_id = envelope
+        .payload
+        .get("group_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("announcement frame has no group")?;
+    let body = envelope
+        .payload
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("announcement frame has no text")?;
+    let admins_only = envelope
+        .payload
+        .get("admins_only")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let created_ms = envelope
+        .payload
+        .get("created_ms")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_else(now_ms);
+    let id = parse_id(announcement_id, "Announcement id")?;
+    let my_id = my_peer_id(app);
+    let mut guard = store(app)?;
+    let (admin, members) = if group_id == EVERYONE_GROUP_ID {
+        (String::new(), roster_of(&guard, group_id, &my_id))
+    } else {
+        let state = guard
+            .get_group_state(group_id)?
+            .ok_or("announcement names a group this device does not know")?;
+        (state.admin.clone(), state.members.clone())
+    };
+    check_announcement_authority(remote, &admin, &members, admins_only)
+        .map_err(|violation| format!("Announcement refused: {violation:?}"))?;
+    let saved = guard.save_announcement(&Announcement {
+        id,
+        group_id: group_id.to_owned(),
+        sender: remote.to_owned(),
+        body: body.to_owned(),
+        clock: Hlc {
+            physical_ms: envelope.hlc.physical_ms,
+            logical: envelope.hlc.logical,
+        },
+        admins_only,
+        created_ms,
+    })?;
+    drop(guard);
+    if saved {
+        let _ = app.emit("messages-changed", group_id.to_owned());
+    }
+    Ok(())
+}
+
+/// Records a peer's acknowledgement of an announcement this device can see.
+pub(crate) fn handle_announcement_ack(
+    app: &AppHandle,
+    remote: &str,
+    envelope: &Envelope<serde_json::Value>,
+) -> Result<(), String> {
+    let raw = envelope
+        .payload
+        .get("announcement_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("announcement ack has no id")?;
+    let id = parse_id(raw, "Announcement id")?;
+    let mut guard = store(app)?;
+    let Some(summary) = guard.acknowledgements_for_announcement(id)? else {
+        return Err("announcement ack names an unknown announcement".into());
+    };
+    let already = summary.acks.iter().any(|ack| ack.peer_id == remote);
+    if !already {
+        guard.acknowledge_announcement(id, remote, now_ms())?;
+    }
+    let group_id = summary.announcement.group_id;
+    drop(guard);
+    if !already {
+        let _ = app.emit("messages-changed", group_id);
+    }
+    Ok(())
 }
 
 // ------------------------------------------------------------------------------------
