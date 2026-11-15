@@ -33,6 +33,8 @@ export type AvatarProps = {
   members?: readonly AvatarMember[];
   /** Accessible name; defaults to `name` or "Group avatar". */
   label?: string;
+  /** Decorative: the surrounding control already names the identity. */
+  decorative?: boolean;
   /** Glyph shown instead of initials, e.g. for the "Everyone" group. */
   glyph?: IconName;
   className?: string;
@@ -61,6 +63,7 @@ export function Avatar({
   members,
   label,
   glyph,
+  decorative,
   className,
 }: AvatarProps) {
   const [failed, setFailed] = useState(false);
@@ -70,8 +73,15 @@ export function Avatar({
   const text = initials ?? initialsFor(name);
   const composite = members && members.length > 0 ? compositeMembers(members) : null;
 
+  const labelText = decorative
+    ? undefined
+    : label ?? name ?? (group || composite ? 'Group avatar' : undefined);
+
   const shared = {
-    'aria-label': label ?? name ?? (group || composite ? 'Group avatar' : undefined),
+    'aria-label': labelText,
+    // An avatar with no name is decorative (a bubble's sender is already named
+    // in the row), so it must not surface as an unlabeled image to assistive tech.
+    'aria-hidden': labelText ? undefined : true,
     className: cx(
       'ac-avatar',
       SIZE_CLASS[size],
@@ -79,7 +89,7 @@ export function Avatar({
       group && !composite && 'ac-avatar--group',
       className,
     ),
-    role: 'img' as const,
+    role: labelText ? ('img' as const) : undefined,
   };
 
   if (composite) {

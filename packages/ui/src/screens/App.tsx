@@ -5,7 +5,8 @@ import { Avatar, Button, EmptyState, Icon, ToastViewport, cx, initialsFor, type 
 import { CallOverlay } from '../calls/CallOverlay';
 import { useCall } from '../calls/useCall';
 import { announcementView, loadPendingAnnouncements } from '../announcements';
-import { groupPeer, summaryOf, type GroupThread } from '../groupChats';
+import { groupPeer, rosterRows, summaryOf, type GroupThread } from '../groupChats';
+import { invalidatePeerAvatars } from '../peerAvatars';
 import { ns, registerNamespace } from '../i18n';
 import shellCatalog from '../i18n/en/shell';
 import { CallsScreen } from './CallsScreen';
@@ -188,10 +189,12 @@ export default function App() {
   }, [bridge, groups, revision]);
 
   const chatPeers = useMemo(() => {
-    const known = new Set(peers.map(peer => peer.id));
+    const byId = new Map(peers.map(peer => [peer.id, peer]));
     return [
       ...peers,
-      ...groups.filter(group => !known.has(group.id)).map(group => groupPeer(group, groupThreads[group.id])),
+      ...groups
+        .filter(group => !byId.has(group.id))
+        .map(group => groupPeer(group, groupThreads[group.id], rosterRows(group, byId))),
     ];
   }, [groupThreads, groups, peers]);
 
@@ -217,6 +220,24 @@ export default function App() {
       stop?.();
     };
   }, [handleCallSignal, nameOf]);
+
+  /* A heartbeat reply is the only thing that says a peer's photo moved; drop the cached
+     picture so the surfaces still on screen pull the new one instead of freezing. */
+  useEffect(() => {
+    if (!isTauri()) return;
+    let alive = true;
+    let stop: (() => void) | null = null;
+    void listen<string>('avatars-changed', event => {
+      if (alive) invalidatePeerAvatars(event.payload);
+    }).then(unlisten => {
+      if (alive) stop = unlisten;
+      else unlisten();
+    });
+    return () => {
+      alive = false;
+      stop?.();
+    };
+  }, []);
 
   function acknowledge(item: Announcement) {
     void bridge
@@ -318,13 +339,20 @@ export default function App() {
 
   return (
     <main className={cx('app', dark && 'dark', mobileChat && 'mobile-chat')} onContextMenu={event => event.preventDefault()}>
-      <aside className="rail">
+      <aside aria-label={text('primaryNav', 'Primary navigation')} className="rail">
         <button aria-label={text('openChats', 'Open chats')} className="brandmark" onClick={() => go('chats')} type="button">
           <Icon filled name="messageCircle" size={22} />
           <span className="brand-dot">•••</span>
         </button>
-        <button aria-label={text('openMyProfile', 'Open my profile')} className="rail-user" onClick={() => go('profile')} type="button">
+        <button
+          className="rail-user"
+          onClick={() => go('profile')}
+          title={text('openMyProfile', 'Open my profile')}
+          type="button"
+        >
+          <span className="ac-sr-only">{text('openMyProfile', 'Open my profile')}</span>
           <Avatar
+            decorative
             initials={initialsFor(settings.displayName)}
             name={settings.displayName || APP_NAME}
             size={40}

@@ -30,6 +30,8 @@ import {
   cx,
   fileKindFor,
   initialsFor,
+  presenceForPeer,
+  statusLineFor,
   type AvatarMember,
   type AvatarPaletteColor,
   type ContextMenuEntry,
@@ -38,9 +40,11 @@ import {
 } from '../components';
 import { ns, registerNamespace } from '../i18n';
 import groupsCatalog from '../i18n/en/groups';
-import { ScreenHeader, type ScreenProps, type ToastTone } from './shared';
+import { ScreenHeader, authorName, type ScreenProps, type ToastTone } from './shared';
 import { AnnouncementBanner } from './SystemStates';
 import {
+  AVATAR_MAX_BYTES,
+  AVATAR_PIXELS,
   AVATAR_PREVIEW_SIZES,
   decodeIconSpec,
   droppedImage,
@@ -60,6 +64,8 @@ const text = ns('groups');
  * ========================================================================== */
 
 const GROUP_NAME_MAX = 50;
+
+const GROUP_DESCRIPTION_MAX = 140;
 
 /** An announcement is a short notice, so the field caps it well below the wire limit. */
 const ANNOUNCEMENT_MAX = 280;
@@ -94,7 +100,9 @@ function failure(error: unknown): string {
 
 function rejectionMessage(reason: AvatarFileRejection): string {
   if (reason === 'type') return text('errorType', 'Only PNG, JPEG or WebP pictures can be used.');
-  if (reason === 'size') return text('errorSize', 'That picture is bigger than 10 MB.');
+  if (reason === 'size') {
+    return text('errorSize', 'That picture is bigger than {{max}} MB.', { max: AVATAR_MAX_BYTES / (1024 * 1024) });
+  }
   return text('errorEmpty', 'That file is empty.');
 }
 
@@ -102,15 +110,6 @@ function paletteColor(value: string | undefined, seed: string): AvatarPaletteCol
   return value && (AVATAR_PALETTE as readonly string[]).includes(value)
     ? (value as AvatarPaletteColor)
     : avatarPaletteFor(seed);
-}
-
-/** Presence for the dot and for the composite-avatar ordering rule. */
-function presenceOf(peer: Peer): PresenceState {
-  if (!peer.online) return 'offline';
-  const status = peer.status.toLowerCase();
-  if (status.includes('meeting') || status.includes('busy') || status.includes('dnd')) return 'busy';
-  if (status.includes('away')) return 'away';
-  return 'online';
 }
 
 function isSelf(id: string, peerId?: string | null): boolean {
@@ -142,15 +141,17 @@ export function membersOf(
   return group.members.map((id) => {
     const me = isSelf(id, peerId);
     const peer = people.find((person) => person.id === id);
-    const name = me ? displayName.trim() || text('you', 'You') : peer?.name ?? id;
+    const name = me
+      ? displayName.trim() || text('you', 'You')
+      : peer?.name ?? authorName(id, people);
     return {
       color: me ? paletteColor(avatarColor, name) : paletteColor(peer?.color, name),
       id,
       initials: peer?.initials ?? initialsFor(name),
       isMe: me,
       name,
-      presence: me ? 'online' : peer ? presenceOf(peer) : 'offline',
-      status: me ? text('statusOnline', 'Online') : peer?.status ?? text('statusUnknown', 'Not seen on this network yet'),
+      presence: me ? 'online' : peer ? presenceForPeer(peer) : 'offline',
+      status: me ? text('statusOnline', 'Online') : peer ? statusLineFor(peer) : text('statusUnknown', 'Not seen on this network yet'),
     };
   });
 }
@@ -305,7 +306,11 @@ export function IconPicker({
               {text('clearIcon', 'Remove')}
             </Button>
           </div>
-          <p className="grp-picker__note">{text('uploadHint', 'Pictures are resized to 256 px and stripped of EXIF before they are stored.')}</p>
+          <p className="grp-picker__note">
+            {text('uploadHint', 'Pictures are resized to {{px}} px and stripped of EXIF before they are stored.', {
+              px: AVATAR_PIXELS,
+            })}
+          </p>
         </div>
       )}
 
@@ -379,7 +384,7 @@ export function MemberPicker({
                 <Avatar
                   color={paletteColor(peer.color, peer.name)}
                   name={peer.name}
-                  presence={presenceOf(peer)}
+                  presence={presenceForPeer(peer)}
                   size={24}
                 />
                 <span className="grp-chip__name">{peer.name}</span>
@@ -441,13 +446,13 @@ function MemberCheckRow({ peer, selected, onToggle }: { peer: Peer; selected: bo
     <ListRow
       aria-pressed={selected}
       className="grp-check-row"
-      hint={peer.status}
+      hint={statusLineFor(peer)}
       leading={
         <>
           <span aria-hidden className={cx('grp-check', selected && 'grp-check--on')}>
             {selected ? <Icon name="check" size={13} /> : null}
           </span>
-          <Avatar color={paletteColor(peer.color, peer.name)} name={peer.name} presence={presenceOf(peer)} size={40} />
+          <Avatar color={paletteColor(peer.color, peer.name)} name={peer.name} presence={presenceForPeer(peer)} size={40} />
         </>
       }
       onClick={() => onToggle(peer.id)}
@@ -1316,7 +1321,10 @@ export function GroupsScreen(props: ScreenProps) {
               glyph: FILE_GLYPH_ICON[fileKindFor(message.fileName ?? message.text)] ?? 'file',
               id: message.id,
               name: message.fileName ?? message.text,
-              sender: message.sender,
+              sender: authorName(message.sender, peers, {
+                id: identity?.peerId ?? 'me',
+                name: settings.displayName.trim() || text('you', 'You'),
+              }),
               time: message.time,
             })),
         );
@@ -1327,7 +1335,7 @@ export function GroupsScreen(props: ScreenProps) {
     return () => {
       live = false;
     };
-  }, [bridge, selected]);
+  }, [bridge, identity?.peerId, peers, selected, settings.displayName]);
 
   useEffect(() => {
     let live = true;
@@ -1594,8 +1602,8 @@ export function GroupsScreen(props: ScreenProps) {
             myId={identity?.peerId}
             onClose={() => setSelectedId(null)}
             onAcknowledgeAnnouncement={acknowledgeAnnouncement}
-            onMakeAdmin={(member) =>
-              toast(text('memberRolePending', 'Admin roles move with the next signed group epoch — not wired to the bridge yet.', { name: member.name }), 'neutral')
+            onMakeAdmin={() =>
+              toast(text('memberRolePending', 'Admin roles move with the next signed group epoch — not wired to the bridge yet.'), 'neutral')
             }
             onMessageMember={(member) => go('chats', member.id)}
             onMute={(next) => void toggleMute(selected, next)}
@@ -1673,9 +1681,9 @@ export function GroupsScreen(props: ScreenProps) {
       <FieldDialog
         busy={busy}
         description={text('descriptionDescription', 'What is this group for? Every member sees it.')}
-        helper={text('descriptionHelper', 'Up to 140 characters.')}
+        helper={text('descriptionHelper', 'Up to {{max}} characters.', { max: GROUP_DESCRIPTION_MAX })}
         label={text('descriptionLabel', 'Description')}
-        maxLength={140}
+        maxLength={GROUP_DESCRIPTION_MAX}
         onChange={setDescriptionValue}
         onOpenChange={(next) => {
           if (!next) setDescriptionTarget(null);

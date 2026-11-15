@@ -39,7 +39,7 @@
   color: var(--accent);
 }
 
-.ac-calls__start h3 {
+.ac-calls__start h2 {
   margin: 0;
   font: 700 var(--ac-font-title) Manrope, Inter, sans-serif;
   color: var(--text);

@@ -23,7 +23,26 @@ jobs:
       - run: pnpm build
       - run: pnpm test
       - run: pnpm lint
-      - run: if rg -n 'https?://' packages/ui/src; then exit 1; fi
+      # No external URLs in shell code. Allowed: the SVG namespace (not a fetch) and reserved
+      # `.example` hosts (RFC 6761) — the fixtures that prove remote avatar URLs are refused.
+      - run: if rg -n 'https?://' packages/ui/src | rg -v 'www\.w3\.org/2000/svg|[a-z0-9.-]+\.example'; then exit 1; fi
+  # The browser suite runs against the mock bridge, so it needs no Tauri shell and no
+  # second machine — and it is the only automated check over the dock, the overlay windows
+  # and the layout audits. `channel: 'chrome'` in playwright.config.ts is the Google Chrome
+  # already on the runner, and vite.config.ts pins port 1420 that the webServer waits for.
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.25.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright test
   rust:
     strategy:
       fail-fast: false
@@ -36,6 +55,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - run: cargo fmt --all -- --check
-      - run: cargo test -p alver-core
-      - run: cargo test -p alverchat-desktop
-      - run: cargo clippy -p alverchat-desktop -- -D warnings
+      - run: cargo test --workspace
+      # --all-targets is what lints the test modules, which is where the protocol
+      # and heartbeat assertions live.
+      - run: cargo clippy --workspace --all-targets -- -D warnings

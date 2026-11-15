@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AVATAR_PALETTE,
-  Avatar,
   Badge,
   Button,
   ContextMenu,
@@ -12,21 +11,25 @@ import {
   IconButton,
   ListGroup,
   ListRow,
+  PeerAvatar,
   SearchInput,
   Skeleton,
   Tabs,
   Tooltip,
   avatarPaletteFor,
   contextMenuItems,
+  presenceForPeer,
+  statusLineFor,
   type AvatarPaletteColor,
   type ContextMenuEntry,
-  type PresenceState,
 } from '../components';
-import { ns } from '../i18n';
+import { ns, registerNamespace } from '../i18n';
+import peopleCatalog from '../i18n/en/people';
 import type { Peer } from '../../../bridge/src';
 import { ScreenHeader, type ScreenProps } from './shared';
 import './PeopleScreen.css';
 
+registerNamespace('people', peopleCatalog);
 const text = ns('people');
 
 type Filter = 'all' | 'online' | 'offline';
@@ -50,16 +53,9 @@ function paletteFor(peer: Peer): AvatarPaletteColor {
   return avatarPaletteFor(peer.id || peer.name);
 }
 
-function presenceFor(peer: Peer): PresenceState {
-  if (!peer.online) return 'offline';
-  const status = peer.status.toLowerCase();
-  if (status.includes('busy') || status.includes('meeting')) return 'busy';
-  if (status.includes('away')) return 'away';
-  return 'online';
-}
-
 function statusFor(peer: Peer): string {
-  if (peer.status.trim().length > 0) return peer.status;
+  const line = statusLineFor(peer);
+  if (line.trim().length > 0) return line;
   return peer.online ? text('online', 'Online') : text('offline', 'Offline');
 }
 
@@ -141,8 +137,8 @@ export function PeopleScreen({ bridge, go, toast, settings, peers: shellPeers, o
   );
 
   /**
-   * Single seam for calling: swap the body for the real dial-out
-   * (`call_offer` over the peer link) when the call engine lands in phase 6.
+   * The one place a call leaves this screen. `dialOut` is the bridge's real `call_offer`
+   * path; the browser preview has no peer link, so it answers with the refusal instead.
    */
   const onCall = useCallback(
     (peer: Peer, kind: 'voice' | 'video') => {
@@ -349,12 +345,14 @@ export function PeopleScreen({ bridge, go, toast, settings, peers: shellPeers, o
                   </span>
                 }
                 leading={
-                  <Avatar
+                  <PeerAvatar
                     color={paletteFor(peer)}
                     initials={peer.initials}
                     name={peer.name}
-                    presence={presenceFor(peer)}
+                    peerId={peer.id}
+                    presence={presenceForPeer(peer)}
                     size={56}
+                    source={bridge}
                   />
                 }
                 title={

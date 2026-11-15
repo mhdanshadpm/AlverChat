@@ -528,6 +528,7 @@ pub(crate) fn handle_offer(
         body,
         clock: envelope.hlc,
         tombstone: false,
+        forwarded: false,
     })?;
     guard.upsert_attachment(&Attachment {
         id,
@@ -794,6 +795,7 @@ pub(crate) fn stage_outgoing(
             logical: 0,
         },
         tombstone: false,
+        forwarded: false,
     })?;
     guard.upsert_attachment(&attachment)?;
     guard.enqueue(chat_id, &envelope)?;

@@ -8,5 +8,11 @@ apps/desktop/src-tauri/target
 
 *.tsbuildinfo
 .dev-peers/
+.dev-peers.bak-*/
 
 __pycache__/
+
+# Playwright output
+/test-results/
+/playwright-report/
+/design/_compare/

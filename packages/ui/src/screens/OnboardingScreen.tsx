@@ -15,12 +15,14 @@ import {
   initialsFor,
   type AvatarPaletteColor,
 } from '../components';
-import { ns } from '../i18n';
+import { ns, registerNamespace } from '../i18n';
+import onboardingCatalog from '../i18n/en/onboarding';
 import type { Peer, PermissionStatus } from '../../../bridge/src';
 import type { ScreenProps } from './shared';
 import { currentPlatform, fallbackFirewallSteps, platformLabel, type AlverPlatform } from './SystemStates';
 import './OnboardingScreen.css';
 
+registerNamespace('onboarding', onboardingCatalog);
 const text = ns('onboarding');
 
 /** Discovery re-polls on this cadence while the people step is on screen. */
@@ -32,7 +34,8 @@ const PEER_POLL_MS = 2000;
 
 type StepId = 'welcome' | 'profile' | 'permissions' | 'people' | 'done';
 
-const STEPS: readonly { id: StepId; label: string; labelKey: string }[] = [
+/** Exported so the key guard can resolve each rail label against `onboarding`. */
+export const STEPS: readonly { id: StepId; label: string; labelKey: string }[] = [
   { id: 'welcome', label: 'Welcome', labelKey: 'stepWelcome' },
   { id: 'profile', label: 'Profile', labelKey: 'stepProfile' },
   { id: 'permissions', label: 'Permissions', labelKey: 'stepPermissions' },
@@ -370,7 +373,8 @@ export function OnboardingScreen({ bridge, go, toast, settings, patchSettings }:
       <div className="ob-window" onKeyDown={onKeyDown} role="group">
         <p className="ob-window__label">{text('windowLabel', 'AlverChat setup')} · 720 × 520</p>
 
-        <aside className="ob-rail">
+        <h1 className="ac-sr-only">{text('setupTitle', 'AlverChat setup')}</h1>
+        <aside aria-label={text('setupProgress', 'Setup progress')} className="ob-rail">
           <span className="ob-brand">
             <Icon filled name="messageCircle" size={17} />
             <b>{text('brand', 'AlverChat')}</b>

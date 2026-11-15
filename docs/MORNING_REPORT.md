@@ -10,6 +10,7 @@ Updated 2026-11-13 (Asia/Kolkata). The product is still incomplete and should no
 - SQLCipher message database with its key stored in the OS credential store, ordered local history, and persistent core outbox primitives.
 - Profile/theme/preferences persistence on this device. Bubble visibility and auto-hide preferences are stored in shared native settings and broadcast to the overlay window; dock snapping is connected to native behavior.
 - Tauri signed updater configured for GitHub Releases. The About page can check for an update, ask before install, download it, and relaunch. A GitHub Actions release workflow builds Windows x64 and Apple Silicon macOS artifacts on `v*` tags.
+  - **Correction, 2026-11-15 19:13.** The second sentence over-described the app for two days. At this date only `check` existed in code — there was no download, install or relaunch anywhere in the front end, and no prompt to ask a question, because there was no action to consent to. Both halves are now built (PROGRESS item 49). The sentence was also wrong about the artifacts: `bundle.targets` listed `dmg` but not `app`, which is the target that yields the `.app.tar.gz` + `.sig` an Apple Silicon client would need, and the published `latest.json` has no darwin entry. An "up to date" answer on this platform proved nothing until a `v*` tag is pushed from the fixed config.
 - Public repository: https://github.com/mhdanshadpm/AlverChat. The private updater signing key is stored in GitHub Actions secrets; only its public key is committed.
 
 ## Still incomplete

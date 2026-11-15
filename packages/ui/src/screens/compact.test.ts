@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { ChatMessage, Group } from '../../../bridge/src';
-import { groupPeer, summaryOf } from '../groupChats';
+import type { ChatMessage, Group, Peer } from '../../../bridge/src';
+import { groupPeer, rosterRows, summaryOf } from '../groupChats';
 
 const GROUP: Group = {
   id: 'group-billing',
@@ -37,6 +37,22 @@ describe('groupPeer', () => {
   it('reads the palette out of an emoji icon and defaults to violet', () => {
     expect(groupPeer({ ...GROUP, icon: '🚀 blue' }, undefined).color).toBe('blue');
     expect(groupPeer(GROUP, undefined).color).toBe('violet');
+  });
+
+  it('borrows the typing flag from its roster, since a group has no session', () => {
+    const rows = [
+      { id: 'peer-anu', typing: true },
+      { id: 'peer-sarath', typing: false },
+    ] as Peer[];
+    expect(groupPeer(GROUP, undefined, rows).typing).toBe(true);
+    expect(groupPeer(GROUP, undefined, [rows[1]]).typing).toBe(false);
+    expect(groupPeer(GROUP, undefined).typing).toBe(false);
+  });
+
+  it('lists roster rows in roster order and skips peers nobody has discovered', () => {
+    const anu = { id: 'peer-anu' } as Peer;
+    expect(rosterRows(GROUP, new Map([['peer-anu', anu]])).map(row => row.id)).toEqual(['peer-anu']);
+    expect(rosterRows(GROUP, new Map())).toEqual([]);
   });
 });
 

@@ -34,6 +34,7 @@ import {
   type DeliveryState,
   type ToastView,
 } from '../components';
+import { APP_VERSION } from './SettingsScreen';
 import './gallery.css';
 
 /** Tiny inline SVG posters so the gallery needs no network access at all. */
@@ -343,7 +344,7 @@ export function Gallery() {
           <Waveform seed={42} progress={playing ? 0.55 : 0.4} positionSeconds={playing ? 19 : 14} durationSeconds={34} playing={playing} onSeek={() => setPlaying(v => !v)} />
           <div className="gallery-row">
             <Tooltip content="Copied to clipboard" side="top"><Button variant="secondary" size="sm">Hover me</Button></Tooltip>
-            <Badge tone="accent">v0.1.2</Badge>
+            <Badge tone="accent">v{APP_VERSION}</Badge>
           </div>
           <div className="gallery-row">
             <Button variant="secondary" onClick={() => setMenu({ x: 120, y: 220 })}>Open context menu</Button>

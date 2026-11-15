@@ -13,11 +13,12 @@ use alver_core::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
-use crate::{commands, start_outbox_retry, OverlayState};
+use crate::{commands, publish, start_outbox_retry, OverlayState};
 
 /// One signalling frame as the webview sends it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -183,16 +184,108 @@ fn event_for(
     })
 }
 
+/// A call the shell believes is still up, derived only from the signalling frames it
+/// relayed. The floating icon reads this to draw its In-Call state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LiveCall {
+    pub call_id: Uuid,
+    pub chat_id: String,
+    /// False while the offer is still waiting for an answer.
+    pub ongoing: bool,
+    /// Wall-clock ms of the answer that connected it; 0 while ringing.
+    pub started_ms: u64,
+    /// Wall-clock ms the registry first saw this call, for a stable pick.
+    pub seen_ms: u64,
+}
+
+/// Folds one recorded call-log event into the live registry.
+/// Returns whether the registry changed, so callers repaint only on a real transition.
+pub(crate) fn apply_call_event(
+    calls: &mut HashMap<Uuid, LiveCall>,
+    event: &CallEvent,
+    at_ms: u64,
+) -> bool {
+    match event.kind {
+        CallEventKind::Offer => {
+            if calls.contains_key(&event.call_id) {
+                return false;
+            }
+            calls.insert(
+                event.call_id,
+                LiveCall {
+                    call_id: event.call_id,
+                    chat_id: event.chat_id.clone(),
+                    ongoing: false,
+                    started_ms: 0,
+                    seen_ms: at_ms,
+                },
+            );
+            true
+        }
+        CallEventKind::Answer => {
+            // `event_for` only records an Answer once it is accepted, so this is the
+            // frame that turns a ringing call into a live one.
+            let Some(call) = calls.get_mut(&event.call_id) else {
+                return false;
+            };
+            if call.ongoing {
+                return false;
+            }
+            call.ongoing = true;
+            call.started_ms = at_ms;
+            true
+        }
+        CallEventKind::End | CallEventKind::Reject | CallEventKind::Busy => {
+            calls.remove(&event.call_id).is_some()
+        }
+    }
+}
+
+/// The call the icon should show: the oldest connected one, or the oldest ringing one
+/// while nothing has been answered.
+pub(crate) fn pick_live_call(calls: &HashMap<Uuid, LiveCall>) -> Option<&LiveCall> {
+    let mut live: Vec<&LiveCall> = calls.values().collect();
+    if live.is_empty() {
+        return None;
+    }
+    live.sort_by(|a, b| {
+        b.ongoing
+            .cmp(&a.ongoing)
+            .then(a.started_ms.cmp(&b.started_ms))
+            .then(a.seen_ms.cmp(&b.seen_ms))
+            .then(a.call_id.cmp(&b.call_id))
+    });
+    live.first().copied()
+}
+
+/// Ends every call belonging to one chat. A peer that vanishes from the LAN never sends
+/// a hang-up, so presence loss is the only signal that its call is over.
+pub(crate) fn drop_calls_for_chat(calls: &mut HashMap<Uuid, LiveCall>, chat_id: &str) -> bool {
+    let before = calls.len();
+    calls.retain(|_, call| call.chat_id != chat_id);
+    calls.len() != before
+}
+
 fn record(app: &AppHandle, event: Option<CallEvent>) {
     let Some(event) = event else {
         return;
     };
     let state = app.state::<OverlayState>();
-    let Ok(mut store) = state.store.lock() else {
-        return;
-    };
-    if let Err(error) = store.save_call_event(&event) {
-        eprintln!("Could not record a call event: {error}");
+    {
+        let Ok(mut store) = state.store.lock() else {
+            return;
+        };
+        if let Err(error) = store.save_call_event(&event) {
+            eprintln!("Could not record a call event: {error}");
+        }
+    }
+    let changed = state
+        .live_calls
+        .lock()
+        .map(|mut calls| apply_call_event(&mut calls, &event, now_ms()))
+        .unwrap_or(false);
+    if changed {
+        publish(app);
     }
 }
 
@@ -373,4 +466,151 @@ fn field<T: serde::de::DeserializeOwned>(payload: &Value, name: &str) -> Result<
             .ok_or_else(|| format!("call frame is missing {name}"))?,
     )
     .map_err(|error| format!("call frame has an invalid {name}: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(call: u128, chat: &str, kind: CallEventKind, accepted: Option<bool>) -> CallEvent {
+        CallEvent {
+            id: Uuid::from_u128(call * 1000),
+            chat_id: chat.to_owned(),
+            call_id: Uuid::from_u128(call),
+            peer_id: chat.to_owned(),
+            kind,
+            accepted,
+            started_ms: 1,
+            ended_ms: None,
+            note: String::new(),
+        }
+    }
+
+    #[test]
+    fn one_call_moves_from_ringing_to_live_to_over() {
+        let mut calls = HashMap::new();
+        assert!(apply_call_event(
+            &mut calls,
+            &event(1, "peer-1", CallEventKind::Offer, None),
+            10
+        ));
+        assert_eq!(calls.len(), 1);
+        assert!(!calls[&Uuid::from_u128(1)].ongoing);
+        assert_eq!(calls[&Uuid::from_u128(1)].started_ms, 0);
+        // A re-offer for the same call must not restart the clock or repaint.
+        assert!(!apply_call_event(
+            &mut calls,
+            &event(1, "peer-1", CallEventKind::Offer, None),
+            20
+        ));
+        assert!(apply_call_event(
+            &mut calls,
+            &event(1, "peer-1", CallEventKind::Answer, Some(true)),
+            30
+        ));
+        assert!(calls[&Uuid::from_u128(1)].ongoing);
+        assert_eq!(calls[&Uuid::from_u128(1)].started_ms, 30);
+        // ICE and other frames never reach here, but a second answer must stay quiet.
+        assert!(!apply_call_event(
+            &mut calls,
+            &event(1, "peer-1", CallEventKind::Answer, Some(true)),
+            40
+        ));
+        assert!(apply_call_event(
+            &mut calls,
+            &event(1, "peer-1", CallEventKind::End, None),
+            50
+        ));
+        assert!(calls.is_empty());
+        assert!(!apply_call_event(
+            &mut calls,
+            &event(1, "peer-1", CallEventKind::End, None),
+            60
+        ));
+    }
+
+    #[test]
+    fn a_refused_call_ends_the_icon_state() {
+        for kind in [CallEventKind::Reject, CallEventKind::Busy] {
+            let mut calls = HashMap::new();
+            apply_call_event(
+                &mut calls,
+                &event(7, "peer-7", CallEventKind::Offer, None),
+                10,
+            );
+            assert!(
+                apply_call_event(&mut calls, &event(7, "peer-7", kind, None), 20),
+                "{kind:?}"
+            );
+            assert!(calls.is_empty());
+        }
+    }
+
+    #[test]
+    fn losing_a_peer_ends_only_its_call() {
+        let mut calls = HashMap::new();
+        apply_call_event(
+            &mut calls,
+            &event(2, "peer-a", CallEventKind::Offer, None),
+            10,
+        );
+        apply_call_event(
+            &mut calls,
+            &event(3, "peer-b", CallEventKind::Offer, None),
+            12,
+        );
+        assert!(drop_calls_for_chat(&mut calls, "peer-a"));
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[&Uuid::from_u128(3)].chat_id, "peer-b");
+        assert!(!drop_calls_for_chat(&mut calls, "peer-a"));
+        // An answer for a chat the registry never saw must not invent a call.
+        assert!(!apply_call_event(
+            &mut calls,
+            &event(9, "peer-c", CallEventKind::Answer, Some(true)),
+            20
+        ));
+        assert!(calls.values().all(|call| call.chat_id != "peer-c"));
+    }
+
+    #[test]
+    fn the_pick_prefers_the_oldest_live_call() {
+        let mut calls = HashMap::new();
+        assert!(pick_live_call(&calls).is_none());
+        apply_call_event(
+            &mut calls,
+            &event(4, "peer-a", CallEventKind::Offer, None),
+            10,
+        );
+        apply_call_event(
+            &mut calls,
+            &event(5, "peer-b", CallEventKind::Offer, None),
+            11,
+        );
+        assert_eq!(
+            pick_live_call(&calls).map(|call| call.call_id),
+            Some(Uuid::from_u128(4)),
+            "the first ringing call wins"
+        );
+        apply_call_event(
+            &mut calls,
+            &event(5, "peer-b", CallEventKind::End, None),
+            12,
+        );
+        apply_call_event(
+            &mut calls,
+            &event(6, "peer-c", CallEventKind::Offer, None),
+            13,
+        );
+        apply_call_event(
+            &mut calls,
+            &event(6, "peer-c", CallEventKind::Answer, Some(true)),
+            14,
+        );
+        assert_eq!(
+            pick_live_call(&calls).map(|call| call.call_id),
+            Some(Uuid::from_u128(6)),
+            "a connected call outranks a ringing one"
+        );
+        assert_eq!(pick_live_call(&calls).map(|call| call.started_ms), Some(14));
+    }
 }

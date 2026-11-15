@@ -68,6 +68,23 @@ pub const MIGRATIONS: &[MIGRATION] = &[
                  ALTER TABLE messages ADD COLUMN reply_to TEXT;
              ",
     },
+    MIGRATION {
+        version: 6,
+        // Every row written before this is an original, so the default is the honest one.
+        sql: "
+                 ALTER TABLE messages ADD COLUMN forwarded INTEGER NOT NULL DEFAULT 0;
+             ",
+    },
+    MIGRATION {
+        version: 7,
+        // Which device pinned a message. Rows written before this cannot be told apart —
+        // a pin from a peer's `pin_update` frame and one made on this device both landed in
+        // the same four columns — so the default is the empty string, which the DTO reads as
+        // "not recorded" rather than as a claim about who did it.
+        sql: "
+                 ALTER TABLE pins ADD COLUMN pinned_by TEXT NOT NULL DEFAULT '';
+             ",
+    },
 ];
 
 /// One entry of [`MIGRATIONS`].
@@ -83,7 +100,7 @@ pub const LATEST_SCHEMA_VERSION: u32 = MIGRATIONS[MIGRATIONS.len() - 1].version;
 /// Connection-level pragmas that must run outside a migration transaction.
 const BOOTSTRAP_PRAGMAS: &str = "PRAGMA foreign_keys = ON;";
 
-/// Encrypted local store. The key must come from the platform keychain.
+/// Encrypted local store. The key must come from the platform secret store.
 pub struct Store {
     pub(crate) connection: Connection,
 }
@@ -133,6 +150,24 @@ impl Store {
             )
             .map_err(|e| e.to_string())
     }
+}
+
+/// Flags a just-written row as a copy, inside the caller's transaction.
+///
+/// Only a copy touches the v6 column. An original needs no statement at all, which is what
+/// keeps a store pinned to an older schema able to write the messages that era held — the
+/// upgrade tests build their v1 databases exactly that way.
+fn mark_forwarded(connection: &Connection, id: Uuid, forwarded: bool) -> Result<(), String> {
+    if !forwarded {
+        return Ok(());
+    }
+    connection
+        .execute(
+            "UPDATE messages SET forwarded = 1 WHERE id = ?1",
+            params![id.to_string()],
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 /// Reads `PRAGMA user_version`.
@@ -211,6 +246,9 @@ impl Store {
                 params![message.id.to_string(), message.chat_id, message.sender, message.body, message.clock.physical_ms, message.clock.logical, message.tombstone],
             )
             .map_err(|e| e.to_string())?;
+        if inserted == 1 {
+            mark_forwarded(&transaction, message.id, message.forwarded)?;
+        }
         if inserted == 1 && !message.tombstone {
             transaction
                 .execute(
@@ -225,7 +263,7 @@ impl Store {
 
     pub fn messages_for_chat(&self, chat_id: &str) -> Result<Vec<Message>, String> {
         let mut statement = self.connection.prepare(
-            "SELECT id, chat_id, sender, body, physical_ms, logical, tombstone FROM messages WHERE chat_id = ?1 ORDER BY physical_ms, logical, id",
+            "SELECT id, chat_id, sender, body, physical_ms, logical, tombstone, forwarded FROM messages WHERE chat_id = ?1 ORDER BY physical_ms, logical, id",
         ).map_err(|error| error.to_string())?;
         let rows = statement
             .query_map(params![chat_id], |row| {
@@ -246,6 +284,7 @@ impl Store {
                         logical: row.get::<_, i64>(5)? as u32,
                     },
                     tombstone: row.get::<_, i64>(6)? != 0,
+                    forwarded: row.get::<_, i64>(7)? != 0,
                 })
             })
             .map_err(|error| error.to_string())?;
@@ -375,8 +414,8 @@ impl Store {
                 params![message.chat_id],
             )
             .map_err(|error| error.to_string())?;
-        // Only a real quote touches the v5 column, so an unwritten `reply_to` keeps this
-        // statement valid against the v1 message shape.
+        // Only a real quote touches the v5 column, and only a real copy touches the v6 one, so
+        // a store pinned to an older schema still writes the rows that era held.
         let inserted = match reply_to {
             None => transaction
                 .execute(
@@ -392,6 +431,7 @@ impl Store {
                 .map_err(|error| error.to_string())?,
         };
         if inserted == 1 {
+            mark_forwarded(transaction, message.id, message.forwarded)?;
             transaction
                 .execute(
                     "INSERT INTO message_search(message_id, body) VALUES (?1, ?2)",
@@ -692,7 +732,7 @@ impl Store {
     pub fn get_message(&self, id: Uuid) -> Result<Option<Message>, String> {
         self.connection
             .query_row(
-                "SELECT id, chat_id, sender, body, physical_ms, logical, tombstone FROM messages WHERE id = ?1",
+                "SELECT id, chat_id, sender, body, physical_ms, logical, tombstone, forwarded FROM messages WHERE id = ?1",
                 params![id.to_string()],
                 |row| {
                     Ok(Message {
@@ -700,6 +740,7 @@ impl Store {
                         chat_id: row.get(1)?, sender: row.get(2)?, body: row.get(3)?,
                         clock: Hlc { physical_ms: row.get::<_, i64>(4)? as u64, logical: row.get::<_, i64>(5)? as u32 },
                         tombstone: row.get::<_, i64>(6)? != 0,
+                        forwarded: row.get::<_, i64>(7)? != 0,
                     })
                 },
             )
@@ -867,6 +908,7 @@ mod tests {
                 logical: 3,
             },
             tombstone: false,
+            forwarded: false,
         };
         store.save_message(&message).unwrap();
         assert_eq!(store.get_message(message.id).unwrap(), Some(message));
@@ -885,6 +927,7 @@ mod tests {
                 logical: 0,
             },
             tombstone: false,
+            forwarded: false,
         };
         let earlier = Message {
             id: Uuid::now_v7(),
@@ -896,6 +939,7 @@ mod tests {
                 logical: 0,
             },
             tombstone: false,
+            forwarded: false,
         };
         let other_chat = Message {
             id: Uuid::now_v7(),
@@ -907,6 +951,7 @@ mod tests {
                 logical: 0,
             },
             tombstone: false,
+            forwarded: false,
         };
         store.save_message(&later).unwrap();
         store.save_message(&other_chat).unwrap();
@@ -933,6 +978,7 @@ mod tests {
                 logical: 2,
             },
             tombstone: false,
+            forwarded: false,
         };
         {
             let mut store = Store::open(&path, &key).unwrap();
@@ -987,6 +1033,7 @@ mod tests {
                 logical: 0,
             },
             tombstone: false,
+            forwarded: false,
         };
         let envelope = Envelope {
             v: crate::PROTOCOL_VERSION,
@@ -1009,6 +1056,93 @@ mod tests {
         assert!(!store.is_message_pending(message.id).unwrap());
     }
 
+    /// A forward keeps no link back to where it came from, so the copy flag is the only trace
+    /// it leaves on the row — every write path, plain, quoted and queued, has to keep it.
+    #[test]
+    fn every_write_path_keeps_the_copy_flag() {
+        fn row(id: Uuid, body: &str, forwarded: bool) -> Message {
+            Message {
+                id,
+                chat_id: "chat-copy".into(),
+                sender: "local".into(),
+                body: body.into(),
+                clock: Hlc {
+                    physical_ms: 20,
+                    logical: 0,
+                },
+                tombstone: false,
+                forwarded,
+            }
+        }
+        fn frame(id: Uuid, forwarded: bool) -> Envelope<serde_json::Value> {
+            Envelope {
+                v: crate::PROTOCOL_VERSION,
+                id,
+                kind: "message".into(),
+                from: "me".into(),
+                to: "chat-copy".into(),
+                hlc: Hlc {
+                    physical_ms: 20,
+                    logical: 0,
+                },
+                payload: serde_json::json!({ "text": "body", "forwarded": forwarded }),
+            }
+        }
+
+        let mut store = Store::open(":memory:", &[41; 32]).unwrap();
+        let (source, quoted, plain) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        store
+            .enqueue_quoted_message(
+                &row(source, "copied in", true),
+                "chat-copy",
+                &frame(source, true),
+                None,
+            )
+            .unwrap();
+        store
+            .enqueue_quoted_message(
+                &row(quoted, "a quoted copy", true),
+                "chat-copy",
+                &frame(quoted, true),
+                Some(source),
+            )
+            .unwrap();
+        store
+            .save_message(&row(plain, "written here", false))
+            .unwrap();
+
+        for id in [source, quoted] {
+            assert!(
+                store.get_message(id).unwrap().unwrap().forwarded,
+                "{id} was written as a copy"
+            );
+        }
+        assert!(
+            !store
+                .messages_for_chat("chat-copy")
+                .unwrap()
+                .into_iter()
+                .find(|message| message.id == plain)
+                .unwrap()
+                .forwarded,
+            "an original stays an original"
+        );
+        // Forwarding a reply does not cost the reply its pointer.
+        assert_eq!(store.reply_to_for(quoted).unwrap(), Some(source));
+
+        // A row written before the column existed has nothing to read back, so the default the
+        // migration hands it is the whole story: nobody forwarded it.
+        let entry = MIGRATIONS
+            .iter()
+            .find(|entry| entry.sql.contains("forwarded"))
+            .expect("a migration adds the copy flag");
+        assert!(
+            entry.sql.contains("NOT NULL DEFAULT 0"),
+            "existing rows must default to originals: {}",
+            entry.sql
+        );
+    }
+
     #[test]
     fn group_fan_out_stores_one_message_and_one_outbox_row_per_member() {
         let group_id = "group-fanout";
@@ -1022,6 +1156,7 @@ mod tests {
                 logical: 0,
             },
             tombstone: false,
+            forwarded: false,
         };
         let deliveries: Vec<_> = ["peer-a", "peer-b"]
             .into_iter()
@@ -1140,6 +1275,7 @@ mod tests {
                 logical: 0,
             },
             tombstone: false,
+            forwarded: false,
         };
         store.save_message(&message).unwrap();
         assert_eq!(store.search_messages("original", 10).unwrap().len(), 1);

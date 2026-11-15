@@ -1,13 +1,14 @@
 {
   "name": "alverchat",
   "private": true,
-  "version": "0.1.2",
+  "version": "0.1.3",
   "packageManager": "pnpm@11.25.0",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "test": "vitest run",
+    "screenshots": "playwright test",
     "lint": "eslint .",
     "format": "prettier --write .",
     "dev:peers": "tsx scripts/dev-peers.ts",
@@ -33,7 +34,9 @@
     "zustand": "^5.0.8"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.14.0",
     "@eslint/js": "^9.39.0",
+    "@playwright/test": "^1.65.0",
     "@tailwindcss/vite": "^4.3.5",
     "@tauri-apps/cli": "^2.8.4",
     "@types/node": "^22.10.0",

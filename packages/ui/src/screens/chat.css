@@ -69,6 +69,7 @@
 
 .ac-chat-list__filters {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--ac-space-2xs);
 }
 
@@ -90,7 +91,6 @@
 .ac-chat-filter small {
   font-size: var(--ac-font-xxs);
   font-variant-numeric: tabular-nums;
-  opacity: 0.75;
 }
 
 .ac-chat-filter:hover {
@@ -579,12 +579,6 @@
   gap: 2px;
   min-width: 0;
   max-width: var(--ac-chat-bubble-max);
-}
-
-.ac-convo__sender {
-  font-size: var(--ac-font-xs);
-  font-weight: 700;
-  color: var(--accent);
 }
 
 .ac-convo__flag {

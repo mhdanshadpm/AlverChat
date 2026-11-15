@@ -16,6 +16,8 @@ export type SegmentedProps = {
   /** Accessible name for the group, e.g. "Theme". */
   label?: string;
   block?: boolean;
+  /** Let more options than fit slide sideways instead of overflowing the pane. */
+  scroll?: boolean;
   disabled?: boolean;
   className?: string;
 };
@@ -31,6 +33,7 @@ export function Segmented({
   onChange,
   label,
   block = false,
+  scroll = false,
   disabled = false,
   className,
 }: SegmentedProps) {
@@ -83,7 +86,13 @@ export function Segmented({
     <div
       aria-disabled={disabled || undefined}
       aria-label={label}
-      className={cx('ac-segmented', block && 'ac-segmented--block', className)}
+      className={cx(
+        'ac-segmented',
+        block && 'ac-segmented--block',
+        scroll && 'ac-segmented--scroll',
+        className,
+      )}
+      data-ac-scroll-x={scroll ? '' : undefined}
       id={groupId}
       onKeyDown={onKeyDown}
       ref={listRef}

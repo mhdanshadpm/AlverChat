@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import type { Update } from '@tauri-apps/plugin-updater';
 import { APP_NAME, type AppSettings, type BackupResult, type ConnectionReport, type PermissionStatus } from '../../../bridge/src';
+import desktopConfig from '../../../../apps/desktop/src-tauri/tauri.conf.json';
 import {
   AVATAR_PALETTE,
   Avatar,
@@ -19,16 +21,23 @@ import {
   Toggle,
   WeekdayPicker,
   formatFileSize,
+  statusLineFor,
   type IconName,
   type SelectOption,
   type ThemeChoice,
   type AvatarPaletteColor,
 } from '../components';
-import { ns } from '../i18n';
+import { LANGUAGES, ns, registerNamespace } from '../i18n';
+import settingsCatalog from '../i18n/en/settings';
+import { namedDevices, openMedia, probeDevices } from '../media';
+import { installAndRestart } from '../updater';
+import { ringPattern } from '../ringtone';
 import { ScreenHeader, type ScreenProps } from './shared';
 import { themeChoiceFor } from '../components/ThemeCards';
 import { displayChord, platformChord } from '../components/HotkeyRecorder';
 import './SettingsScreen.css';
+
+registerNamespace('settings', settingsCatalog);
 
 /* ------------------------------------------------------------------ *
  * 7.10 Settings — left category rail plus every control on
@@ -38,8 +47,18 @@ import './SettingsScreen.css';
 
 /* ===== logic ===== */
 
-/** Mirrors the root `package.json` version; the shell shows the same string. */
-export const APP_VERSION = '0.1.2';
+/**
+ * Read from the desktop build config rather than typed a second time: that file's `version` is what
+ * `tauri build` stamps on the artifacts and what the updater compares a manifest against, so a bump
+ * there has to move the number the About page prints. `release_config_tests` refuses a literal here.
+ */
+export const APP_VERSION: string = desktopConfig.version;
+
+/**
+ * The shortest backup passphrase the desktop accepts. `apps/desktop/src-tauri/src/platform.rs`
+ * owns that gate, and `settings_surface_tests` refuses this copy once it drifts from it.
+ */
+const BACKUP_PASSPHRASE_MIN_LEN = 8;
 
 export type SettingsCategory =
   | 'general'
@@ -116,6 +135,16 @@ export const CORNER_VALUES = [
   'right-bottom',
 ] as const;
 
+/** Exported so the key guard can resolve each corner label against `settings`. */
+export const CORNER_LABELS: Record<(typeof CORNER_VALUES)[number], [string, string]> = {
+  'left-top': ['cornerLeftTop', 'Left - Top'],
+  'left-center': ['cornerLeftCenter', 'Left - Center'],
+  'left-bottom': ['cornerLeftBottom', 'Left - Bottom'],
+  'right-top': ['cornerRightTop', 'Right - Top'],
+  'right-center': ['cornerRightCenter', 'Right - Center'],
+  'right-bottom': ['cornerRightBottom', 'Right - Bottom'],
+};
+
 export function cornerValueFor(value: string): string {
   return (CORNER_VALUES as readonly string[]).includes(value) ? value : 'right-center';
 }
@@ -126,8 +155,8 @@ export function deviceOptions(
   kind: MediaDeviceKind,
   defaultLabel: string,
 ): SelectOption[] {
-  const named = devices
-    .filter((device) => device.kind === kind && device.deviceId && device.label.trim().length > 0)
+  const named = namedDevices(devices)
+    .filter((device) => device.kind === kind)
     .map((device) => ({ value: device.deviceId, label: device.label }));
   return [{ value: 'default', label: defaultLabel }, ...named];
 }
@@ -205,11 +234,13 @@ export default function SettingsScreen(props: ScreenProps) {
   const [micPermission, setMicPermission] = useState<PermissionStatus | null>(null);
   const [cameraPermission, setCameraPermission] = useState<PermissionStatus | null>(null);
   const [testingSetup, setTestingSetup] = useState(false);
+  const [probing, setProbing] = useState(false);
   const [setupResult, setSetupResult] = useState<{ ok: boolean; lines: string[] } | null>(null);
   const [backups, setBackups] = useState<BackupResult[]>([]);
   const [exportResult, setExportResult] = useState<{ path: string; messages: number } | null>(null);
   const [busy, setBusy] = useState<'backup' | 'export' | 'restore' | 'update' | null>(null);
   const [updateState, setUpdateState] = useState<'unknown' | 'current' | 'available'>('unknown');
+  const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
   const [backupDialog, setBackupDialog] = useState(false);
   const [restoreDialog, setRestoreDialog] = useState(false);
   const [mutedDialog, setMutedDialog] = useState(false);
@@ -316,23 +347,30 @@ export default function SettingsScreen(props: ScreenProps) {
     };
   }, [bridge]);
 
-  useEffect(() => {
+  const refreshDevices = useCallback((): Promise<readonly MediaDeviceInfo[]> => {
     const media = typeof navigator !== 'undefined' ? navigator.mediaDevices : undefined;
-    if (!media?.enumerateDevices) return;
-    if (micPermission?.state === 'denied') return;
-    let mounted = true;
-    void media
+    if (!media?.enumerateDevices) return Promise.resolve([]);
+    return media
       .enumerateDevices()
       .then((list) => {
-        if (mounted) setDevices(list);
+        setDevices(list);
+        return list as readonly MediaDeviceInfo[];
       })
-      .catch(() => {
-        /* labels stay hidden until the user grants access */
-      });
-    return () => {
-      mounted = false;
+      .catch(() => [] as readonly MediaDeviceInfo[]);
+  }, []);
+
+  useEffect(() => {
+    if (micPermission?.state === 'denied') return;
+    const media = typeof navigator !== 'undefined' ? navigator.mediaDevices : undefined;
+    void refreshDevices();
+    if (!media?.addEventListener) return;
+    /* Plugging in a headset or starting a call both rename the whole list. */
+    const onDeviceChange = () => {
+      void refreshDevices();
     };
-  }, [micPermission?.state, settings.microphone, settings.camera]);
+    media.addEventListener('devicechange', onDeviceChange);
+    return () => media.removeEventListener('devicechange', onDeviceChange);
+  }, [micPermission?.state, refreshDevices, settings.microphone, settings.camera]);
 
   /* --- derived --------------------------------------------------------- */
   const mutedChats = useMemo(() => peers.filter((peer) => peer.muted), [peers]);
@@ -412,13 +450,19 @@ export default function SettingsScreen(props: ScreenProps) {
       try {
         const ctx = audioRef.current ?? new Ctor();
         audioRef.current = ctx;
-        const notes = kind === 'ringtone' ? [659.25, 880, 659.25] : [880, 1174.66];
-        notes.forEach((frequency, index) => {
-          const start = ctx.currentTime + index * 0.19;
+        const notes =
+          kind === 'ringtone'
+            ? ringPattern(settings.ringtone).notes
+            : [
+                { at: 0, hz: 880 },
+                { at: 0.19, hz: 1174.66 },
+              ];
+        notes.forEach((note) => {
+          const start = ctx.currentTime + note.at;
           const oscillator = ctx.createOscillator();
           const gain = ctx.createGain();
           oscillator.type = 'sine';
-          oscillator.frequency.value = frequency;
+          oscillator.frequency.value = note.hz;
           gain.gain.setValueAtTime(0.0001, start);
           gain.gain.exponentialRampToValueAtTime(0.09, start + 0.02);
           gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.17);
@@ -432,7 +476,7 @@ export default function SettingsScreen(props: ScreenProps) {
         fail(error);
       }
     },
-    [fail, text, toast],
+    [fail, settings.ringtone, text, toast],
   );
 
   const runTest = useCallback(() => {
@@ -474,6 +518,44 @@ export default function SettingsScreen(props: ScreenProps) {
     void bridge.revealPath(settings.downloadsDir).catch(fail);
   }, [bridge, fail, settings.downloadsDir, toast]);
 
+  /**
+   * Device names are invisible to this webview until it holds media access, so a
+   * brief grant is the only way to turn an empty picker into a usable one.
+   */
+  const detectDevices = useCallback(() => {
+    const media = typeof navigator !== 'undefined' ? navigator.mediaDevices : undefined;
+    if (!media?.getUserMedia) {
+      toast(text('noMedia', 'This window does not expose camera or microphone access.'), 'danger');
+      return;
+    }
+    setProbing(true);
+    void probeDevices(media)
+      .then(async (probe) => {
+        const list = await refreshDevices();
+        const inputs = namedDevices(list).filter((device) => device.kind !== 'audiooutput').length;
+        if (probe === 'none') {
+          toast(
+            text('detectNone', 'AlverChat needs microphone and camera access before it can list devices.'),
+            'danger',
+          );
+        } else if (inputs === 0) {
+          toast(text('detectEmpty', 'Access is allowed, but no camera or microphone was reported.'), 'danger');
+        } else {
+          toast(
+            probe === 'both'
+              ? text('detectOk', '{{count}} devices ready — choose your microphone and camera below.', {
+                  count: inputs,
+                })
+              : text('detectMicOnly', '{{count}} microphones ready. Allow camera access to choose a camera.', {
+                  count: inputs,
+                }),
+            'success',
+          );
+        }
+      })
+      .finally(() => setProbing(false));
+  }, [refreshDevices, text, toast]);
+
   const testSetup = useCallback(async () => {
     setTestingSetup(true);
     setSetupResult(null);
@@ -490,19 +572,32 @@ export default function SettingsScreen(props: ScreenProps) {
       }
       const audioId = settings.microphone === 'default' ? undefined : settings.microphone;
       const videoId = settings.camera === 'default' ? undefined : settings.camera;
-      const stream = await media.getUserMedia({ audio: { deviceId: audioId }, video: videoId ? { deviceId: videoId } : false });
-      stream.getTracks().forEach((track) => track.stop());
+      // The same pins a call uses, so passing here means calling works too.
+      const opened = await openMedia(media, {
+        audio: {
+          deviceId: audioId ? { exact: audioId } : undefined,
+          echoCancellation: settings.echoCancellation,
+          noiseSuppression: settings.noiseSuppression,
+        },
+        video: videoId ? { deviceId: { exact: videoId } } : true,
+      });
+      const sawVideo = opened.stream.getVideoTracks().length > 0;
+      opened.stream.getTracks().forEach((track) => track.stop());
+      const list = namedDevices(await refreshDevices());
       lines.push(
         text('testMic', 'Microphone “{{device}}” captured audio.', {
           device:
-            devices.find((device) => device.deviceId === settings.microphone)?.label ??
+            list.find((device) => device.deviceId === settings.microphone)?.label ??
             text('defaultDevice', 'the default device'),
         }),
       );
-      if (videoId !== undefined) lines.push(text('testCamera', 'Camera preview started and stopped cleanly.'));
+      if (opened.usedDefault) {
+        lines.push(text('deviceGone', 'The device you chose was not connected, so the system default was used instead.'));
+      }
+      if (sawVideo) lines.push(text('testCamera', 'Camera preview started and stopped cleanly.'));
       lines.push(
         text('testSpeakers', '{{count}} output device(s) available.', {
-          count: devices.filter((device) => device.kind === 'audiooutput').length,
+          count: list.filter((device) => device.kind === 'audiooutput').length,
         }),
       );
       setSetupResult({ ok: true, lines });
@@ -514,7 +609,17 @@ export default function SettingsScreen(props: ScreenProps) {
     } finally {
       setTestingSetup(false);
     }
-  }, [cameraPermission?.state, devices, micPermission?.state, settings.camera, settings.microphone, text, toast]);
+  }, [
+    cameraPermission?.state,
+    micPermission?.state,
+    refreshDevices,
+    settings.camera,
+    settings.echoCancellation,
+    settings.microphone,
+    settings.noiseSuppression,
+    text,
+    toast,
+  ]);
 
   const unmuteChat = useCallback(
     (chatId: string) => {
@@ -631,10 +736,12 @@ export default function SettingsScreen(props: ScreenProps) {
 
   const checkUpdates = useCallback(async () => {
     setBusy('update');
+    setPendingUpdate(null);
     try {
       if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
         const { check } = await import('@tauri-apps/plugin-updater');
         const updateInfo = await check();
+        setPendingUpdate(updateInfo);
         setUpdateState(updateInfo ? 'available' : 'current');
         toast(
           updateInfo
@@ -656,8 +763,34 @@ export default function SettingsScreen(props: ScreenProps) {
     }
   }, [fail, text, toast]);
 
+  /**
+   * The half the docs have described since Phase 7 and no code performed: the download, the
+   * signature check against the key bundled in `tauri.conf.json`, and the restart. `check` only
+   * reports, so nothing downloads until a person clicks this row.
+   */
+  const installUpdate = useCallback(async () => {
+    if (!pendingUpdate) return;
+    setBusy('update');
+    try {
+      toast(
+        text('updateInstalling', 'Installing {{version}}. AlverChat restarts when it is done.', { version: pendingUpdate.version }),
+        'neutral',
+      );
+      const { relaunch } = await import('@tauri-apps/plugin-process');
+      await installAndRestart(pendingUpdate, relaunch);
+    } catch (error) {
+      // A refused signature arrives here rather than as a dialog, which is the whole reason the
+      // key is checked before anything is written to disk.
+      fail(error);
+    } finally {
+      setBusy(null);
+    }
+  }, [fail, pendingUpdate, text, toast]);
+
   /* --- option lists ---------------------------------------------------- */
-  const languageOptions: SelectOption[] = [{ value: 'en', label: text('languageEnglish', 'English') }];
+  const languageLabels: Record<string, string> = { en: text('languageEnglish', 'English') };
+  /* Offered from what i18n serves, so the picker cannot name a language the app has no strings for. */
+  const languageOptions: SelectOption[] = LANGUAGES.map(value => ({ value, label: languageLabels[value] ?? value }));
   const themeLabels = {
     light: text('themeLight', 'Light'),
     dark: text('themeDark', 'Dark'),
@@ -668,14 +801,8 @@ export default function SettingsScreen(props: ScreenProps) {
     { value: 'photo', label: text('idlePhoto', 'My Profile Photo') },
   ];
   const cornerOptions: SelectOption[] = CORNER_VALUES.map((value) => {
-    const [side, position] = value.split('-');
-    return {
-      value,
-      label: text(
-        `corner${side === 'left' ? 'Left' : 'Right'}${position === 'top' ? 'Top' : position === 'center' ? 'Center' : 'Bottom'}`,
-        `${side === 'left' ? 'Left' : 'Right'} - ${position === 'top' ? 'Top' : position === 'center' ? 'Center' : 'Bottom'}`,
-      ),
-    };
+    const [key, fallback] = CORNER_LABELS[value];
+    return { value, label: text(key, fallback) };
   });
   const editOptions = numberOptions([15, 60, 1440, 0], (value) =>
     value === 0
@@ -683,8 +810,8 @@ export default function SettingsScreen(props: ScreenProps) {
       : value < 60
         ? text('editMinutes', '{{count}} minutes', { count: value })
         : value === 60
-          ? text('editHour', '1 hour')
-          : text('editDay', '24 hours'),
+          ? text('editHour', '{{count}} hour', { count: value / 60 })
+          : text('editDay', '{{count}} hours', { count: value / 60 }),
   );
   const downloadOptions = numberOptions([10, 25, 50, 100, 250], (value) =>
     text('sizeMb', '{{count}} MB', { count: value }),
@@ -704,13 +831,14 @@ export default function SettingsScreen(props: ScreenProps) {
   const defaultMic = text('defaultMic', 'Default microphone');
   const defaultSpeaker = text('defaultSpeaker', 'Default speakers');
   const defaultCamera = text('defaultCamera', 'Default camera');
-  const micOptions = withCurrent(deviceOptions(devices, 'audioinput', defaultMic), settings.microphone, settings.microphone);
+  const savedDevice = text('savedDevice', 'Saved device (not connected now)');
+  const micOptions = withCurrent(deviceOptions(devices, 'audioinput', defaultMic), settings.microphone, savedDevice);
   const speakerOptions = withCurrent(
     deviceOptions(devices, 'audiooutput', defaultSpeaker),
     settings.speaker,
-    settings.speaker,
+    savedDevice,
   );
-  const cameraOptions = withCurrent(deviceOptions(devices, 'videoinput', defaultCamera), settings.camera, settings.camera);
+  const cameraOptions = withCurrent(deviceOptions(devices, 'videoinput', defaultCamera), settings.camera, savedDevice);
   const networkOptions = adapterOptions(adapters, text('adapterAuto', 'Automatic'));
 
   /* --- rail ------------------------------------------------------------ */
@@ -824,7 +952,9 @@ export default function SettingsScreen(props: ScreenProps) {
           <i aria-hidden className="stg-rail-rule" />
           <span>{text('title', 'Settings')}</span>
         </div>
-        <div className="stg-rail-list">
+        {/* Becomes a sideways strip below 980 px; the flag tells the layout audit it
+            is deliberate rather than an overflow. */}
+        <div className="stg-rail-list" data-ac-scroll-x="">
           {railItems.map((item) => (
             <ListRow
               current={category === item.id}
@@ -1112,7 +1242,7 @@ export default function SettingsScreen(props: ScreenProps) {
                 mutedChats.map((peer) => (
                   <ListRow
                     className="stg-row"
-                    hint={peer.status}
+                    hint={statusLineFor(peer)}
                     key={peer.id}
                     leading={
                       <Avatar
@@ -1225,6 +1355,20 @@ export default function SettingsScreen(props: ScreenProps) {
         {category === 'calls' ? (
           <div className="stg-stack">
             <ListGroup>
+              <ListRow
+                className="stg-row"
+                hint={text(
+                  'detectHint',
+                  'AlverChat briefly turns on the camera and microphone so their names can be listed below.',
+                )}
+                icon="search"
+                title={text('detectDevices', 'Choose camera and microphone')}
+                trailing={
+                  <Button loading={probing} onClick={detectDevices} size="sm" variant="secondary">
+                    {text('detectButton', 'Detect devices')}
+                  </Button>
+                }
+              />
               {row(
                 'microphone',
                 'mic',
@@ -1334,8 +1478,11 @@ export default function SettingsScreen(props: ScreenProps) {
               />
             ) : null}
             <p className="stg-note">
-              {devices.length === 0
-                ? text('devicesHidden', 'Device names stay hidden until you grant camera or microphone access.')
+              {namedDevices(devices).length === 0
+                ? text(
+                    'devicesHidden',
+                    'Names stay hidden until you allow media access — press Detect devices above.',
+                  )
                 : text('deviceCount', '{{count}} devices detected on this machine.', { count: devices.length })}
             </p>
           </div>
@@ -1348,10 +1495,18 @@ export default function SettingsScreen(props: ScreenProps) {
                 'lanEncryption',
                 'lock',
                 text('lanEncryption', 'LAN encryption'),
-                toggleFor(text('lanEncryption', 'LAN encryption'), settings.lanEncryption, (next) =>
-                  update({ lanEncryption: next }),
+                // A status, not a switch. Nothing in the transport reads a stored preference
+                // for this — what encrypts a session is the passphrase challenge — so a toggle
+                // here could only ever say something the wire then contradicted.
+                passphraseSet ? (
+                  <Badge tone="success">{text('lanEncryptionOn', 'Encrypted')}</Badge>
+                ) : (
+                  <Badge tone="neutral">{text('lanEncryptionOff', 'Not encrypted')}</Badge>
                 ),
-                text('lanEncryptionHint', 'Encrypt chat and file traffic on the local network.'),
+                text(
+                  'lanEncryptionHint',
+                  'This follows the network passphrase below — a saved passphrase is what encrypts the traffic.',
+                ),
               )}
               <ListRow
                 className="stg-row"
@@ -1447,6 +1602,10 @@ export default function SettingsScreen(props: ScreenProps) {
                     <span className="stg-report-ports">
                       {text('reportPort', 'Port {{port}}', { port: report.port })} ·{' '}
                       {text('reportDiscovery', 'Discovery {{port}}', { port: report.discoveryPort })}
+                      {' · '}
+                      {report.discoveryActive
+                        ? text('reportDiscoveryLive', 'fallback listening')
+                        : text('reportDiscoveryIdle', 'fallback not listening')}
                     </span>
                   </div>
                   <dl className="stg-report-grid">
@@ -1544,6 +1703,13 @@ export default function SettingsScreen(props: ScreenProps) {
                 onClick={() => void checkUpdates()}
                 title={text('checkUpdates', 'Check for updates')}
               />
+              {pendingUpdate ? (
+                <div className="stg-about-actions">
+                  <Button icon="download" loading={busy === 'update'} onClick={() => void installUpdate()} variant="primary">
+                    {text('installUpdate', 'Install {{version}}', { version: pendingUpdate.version })}
+                  </Button>
+                </div>
+              ) : null}
               {identity ? (
                 <ListRow
                   className="stg-row"
@@ -1676,10 +1842,15 @@ export default function SettingsScreen(props: ScreenProps) {
       >
         <Input
           aria-label={text('backupPassphrase', 'Backup passphrase')}
-          hint={text('backupPassphraseHint', 'You need it to restore this file later.')}
+          hint={text(
+            'backupPassphraseHint',
+            'You need it to restore this file, which also holds this device’s keys — keep it private.',
+          )}
           label={text('backupPassphrase', 'Backup passphrase')}
           onChange={(event) => setBackupPassphrase(event.target.value)}
-          placeholder={text('backupPassphrasePlaceholder', 'At least 8 characters')}
+          placeholder={text('backupPassphrasePlaceholder', 'At least {{min}} characters', {
+            min: BACKUP_PASSPHRASE_MIN_LEN,
+          })}
           type="password"
           value={backupPassphrase}
         />
@@ -1754,7 +1925,7 @@ export default function SettingsScreen(props: ScreenProps) {
             peers.map((peer) => (
               <ListRow
                 className="stg-row"
-                hint={peer.status}
+                hint={statusLineFor(peer)}
                 key={peer.id}
                 leading={
                   <Avatar

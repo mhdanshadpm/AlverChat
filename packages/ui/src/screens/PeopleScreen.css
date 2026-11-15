@@ -123,12 +123,12 @@
 }
 
 .pp-row__status {
-  color: var(--ac-presence-offline);
+  color: var(--muted);
   font-weight: 600;
 }
 
 .pp-row__status--online {
-  color: var(--green);
+  color: var(--ac-success-text);
 }
 
 /* ===== Discovery / scanning panel (board 1.3) ============================== */

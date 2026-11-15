@@ -232,7 +232,6 @@ export function HotkeyRecorder({
       <button
         aria-disabled={disabled || undefined}
         aria-keyshortcuts={displayChord(pending) || value || undefined}
-        aria-label={label}
         className="ac-hotkey__field"
         disabled={disabled}
         onBlur={() => {
@@ -245,6 +244,7 @@ export function HotkeyRecorder({
         ref={fieldRef}
         type="button"
       >
+        <span className="ac-sr-only">{label}</span>
         <span className={cx('ac-hotkey__value', !shown && 'ac-hotkey__value--empty')}>
           {shown || placeholder}
         </span>

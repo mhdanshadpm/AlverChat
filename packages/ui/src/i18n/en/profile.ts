@@ -4,6 +4,9 @@
  * fallback, so a missing key degrades to the sentence it replaces.
  */
 export default {
+  /* The two reasons a call started from a profile card can refuse. */
+  callsGroupsLater: 'Group calls are not available yet.',
+  callsUnavailable: 'Calls are unavailable on this device.',
   errorType: 'Only PNG, JPEG or WebP pictures can be used.',
   errorSize: 'That picture is bigger than {{max}} MB.',
   errorEmpty: 'That file is empty.',
@@ -66,7 +69,7 @@ export default {
   lastSeen: 'Last seen {{time}}',
   fingerprintHint: 'Verified on this network segment — no server ever sees it.',
   fingerprint: 'Local-network fingerprint',
-  callsSoon: 'Voice and video calls ship in phase 6.',
+  callTransport: 'Voice and video calls go over the same peer session as your messages.',
   sharedMedia: 'Shared Media',
   itemsCount: '{{count}} items',
   files: 'Files',
@@ -91,7 +94,6 @@ export default {
   viewerSize: 'Size',
   viewerUnknownSize: 'Not announced',
   viewerThumb: 'Show {{name}}',
-  callsPhase6: 'Calls arrive in phase 6.',
   mutedToast: '{{name}} is muted on this device.',
   unmutedToast: '{{name}} is no longer muted.',
   clearedToast: 'Conversation with {{name}} cleared on this device.',

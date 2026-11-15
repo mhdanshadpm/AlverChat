@@ -12,7 +12,8 @@ const text = ns('shell');
 
 type CallFilter = 'all' | 'missed' | 'group';
 
-const STATUS_LABEL: Record<CallStatus, [string, string]> = {
+/** Exported so the key guard can resolve the row label against `shell`. */
+export const STATUS_LABEL: Record<CallStatus, [string, string]> = {
   missed: ['callMissed', 'Missed'],
   declined: ['callDeclined', 'Declined'],
   ended: ['callEnded', 'Ended'],
@@ -125,7 +126,7 @@ export function CallsScreen({ bridge, peers, go, toast, identity, onCall }: Scre
         <span className="ac-calls__art">
           <Icon name="phoneCall" size={30} />
         </span>
-        <h3>{text('callStart', 'Start a call')}</h3>
+        <h2>{text('callStart', 'Start a call')}</h2>
         <p>{text('callStartBody', 'Calls stay on your local network — no server ever carries the audio.')}</p>
         <div className="ac-calls__start-actions">
           <button className="primary" onClick={() => startCall('audio')} type="button">
@@ -140,7 +141,7 @@ export function CallsScreen({ bridge, peers, go, toast, identity, onCall }: Scre
       </section>
 
       <div className="ac-calls__toolbar">
-        <h4 className="ac-calls__history">{text('callHistory', 'Call history')}</h4>
+        <h2 className="ac-calls__history">{text('callHistory', 'Call history')}</h2>
         <Segmented
           label={text('callFilter', 'Filter calls')}
           onChange={value => setFilter(value as CallFilter)}
@@ -196,8 +197,12 @@ export function CallsScreen({ bridge, peers, go, toast, identity, onCall }: Scre
                     label={text('callBack', 'Call back')}
                     name="phone"
                     onClick={() => {
-                      if (call.kind === 'group' || !onCall) {
-                        toast(text('callUnavailable', 'Calls are unavailable until LAN call signaling is connected.'), 'danger');
+                      if (call.kind === 'group') {
+                        toast(text('callsGroupsLater', 'Group calls are not available yet.'), 'neutral');
+                        return;
+                      }
+                      if (!onCall) {
+                        toast(text('callUnavailable', 'Calls need the desktop app.'), 'danger');
                         return;
                       }
                       onCall(call.chatId, 'audio');

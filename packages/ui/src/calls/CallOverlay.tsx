@@ -3,6 +3,8 @@ import { Avatar, Icon, cx } from '../components';
 import { ns, registerNamespace } from '../i18n';
 import shellCatalog from '../i18n/en/shell';
 import type { AppSettings } from '../../../bridge/src';
+import { ringPattern } from '../ringtone';
+import { applySinkId } from '../media';
 import type { CallController, LocalCall } from './useCall';
 import './calls.css';
 
@@ -25,10 +27,11 @@ function useElapsed(call: LocalCall): number {
   return Math.max(0, Math.floor((now - call.startedAt) / 1000));
 }
 
-/** A short two-tone ring, driven by WebAudio so no asset has to ship. */
-function useRingtone(active: boolean, muted: boolean) {
+/** The chosen ringtone, repeated until the call is answered, declined or dismissed. WebAudio, so no asset ships. */
+function useRingtone(active: boolean, muted: boolean, ringtone: string) {
   useEffect(() => {
-    if (!active || muted) return;
+    const pattern = ringPattern(ringtone);
+    if (!active || muted || pattern.notes.length === 0) return;
     const AudioCtor = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
     if (!AudioCtor) return;
     const context = new AudioCtor();
@@ -47,21 +50,20 @@ function useRingtone(active: boolean, muted: boolean) {
       oscillator.stop(context.currentTime + at + 0.4);
     };
     const ring = () => {
-      tone(740, 0);
-      tone(560, 0.45);
+      for (const note of pattern.notes) tone(note.hz, note.at);
     };
     ring();
-    const timer = window.setInterval(ring, 2000);
+    const timer = window.setInterval(ring, pattern.repeatMs);
     return () => {
       stopped = true;
       window.clearInterval(timer);
       void context.close();
     };
-  }, [active, muted]);
+  }, [active, muted, ringtone]);
 }
 
-/** Binds a MediaStream to a <video>/<audio> element. */
-function StreamView({ stream, video, muted, className }: { stream: MediaStream | null; video: boolean; muted: boolean; className?: string }) {
+/** Binds a MediaStream to a <video>/<audio> element, on the output Settings picked where the webview takes one. */
+function StreamView({ className, muted, sinkId, stream, video }: { className?: string; muted: boolean; sinkId?: string; stream: MediaStream | null; video: boolean }) {
   const ref = useRef<HTMLVideoElement | HTMLAudioElement | null>(null);
   useEffect(() => {
     const element = ref.current;
@@ -71,6 +73,9 @@ function StreamView({ stream, video, muted, className }: { stream: MediaStream |
       element.srcObject = null;
     };
   }, [stream]);
+  useEffect(() => {
+    if (ref.current) applySinkId(ref.current, sinkId);
+  }, [sinkId]);
   if (!video) {
     // Remote audio plays through a hidden element so voice calls need no video surface.
     return <audio autoPlay ref={ref as RefObject<HTMLAudioElement>} />;
@@ -191,7 +196,7 @@ export function CallOverlay({
   const { call } = controller;
   const [devicesOpen, setDevicesOpen] = useState(false);
   const elapsed = useElapsed(call);
-  useRingtone(call.phase === 'ringing' && call.incoming, settings.notificationsMuted);
+  useRingtone(call.phase === 'ringing' && call.incoming, settings.notificationsMuted, settings.ringtone);
 
   const dismiss = controller.dismiss;
   useEffect(() => {
@@ -240,7 +245,7 @@ export function CallOverlay({
         <Avatar name={call.peerName} size={40} />
         <div className="ac-call__ended-body">
           <strong>{call.peerName}</strong>
-          <span>{call.error ?? (call.endedAt ? text('callEnded', 'Call ended') : text('callEnded', 'Call ended'))}</span>
+          <span>{call.error ?? text('callEnded', 'Ended')}</span>
         </div>
         <button aria-label={text('callDismiss', 'Dismiss')} className="ac-call__control" onClick={controller.dismiss} type="button">
           <Icon name="x" size={16} />
@@ -254,14 +259,14 @@ export function CallOverlay({
     call.phase === 'calling'
       ? text('callCalling', 'Calling…')
       : call.phase === 'ringing'
-        ? text('callRinging', 'Ringing…')
+        ? text('callRinging', 'Ringing')
         : clock(elapsed);
 
   if (call.pip) {
     return (
       <div className="ac-call-pip">
         {video && call.remoteStream ? (
-          <StreamView className="ac-call-pip__video" muted={false} stream={call.remoteStream} video />
+          <StreamView className="ac-call-pip__video" muted={false} sinkId={settings.speaker} stream={call.remoteStream} video />
         ) : (
           <Avatar name={call.peerName} size={56} />
         )}
@@ -274,7 +279,7 @@ export function CallOverlay({
             <Icon name="phoneOff" size={14} />
           </button>
         </div>
-        {!video ? <StreamView muted={false} stream={call.remoteStream} video={false} /> : null}
+        {!video ? <StreamView muted={false} sinkId={settings.speaker} stream={call.remoteStream} video={false} /> : null}
       </div>
     );
   }
@@ -282,7 +287,7 @@ export function CallOverlay({
   return (
     <section className={cx('ac-call', video && 'ac-call--video')} aria-label={text('callWindow', 'Call')}>
       {video ? (
-        <StreamView className="ac-call__remote" muted={false} stream={call.remoteStream} video />
+        <StreamView className="ac-call__remote" muted={false} sinkId={settings.speaker} stream={call.remoteStream} video />
       ) : (
         <div className="ac-call__voice">
           <Avatar name={call.peerName} size="lg" />
@@ -297,7 +302,7 @@ export function CallOverlay({
             <i />
             <i />
           </div>
-          <StreamView muted={false} stream={call.remoteStream} video={false} />
+          <StreamView muted={false} sinkId={settings.speaker} stream={call.remoteStream} video={false} />
         </div>
       )}
       {video ? (
@@ -335,9 +340,9 @@ export function CallOverlay({
 /** Exported for the gallery and tests: the label a call card would show. */
 export function callLabel(call: LocalCall): string {
   if (call.phase === 'calling') return text('callCalling', 'Calling…');
-  if (call.phase === 'ringing') return text('callRinging', 'Ringing…');
+  if (call.phase === 'ringing') return text('callRinging', 'Ringing');
   if (call.phase === 'active') return text('callOngoing', 'Ongoing');
   if (call.phase === 'failed') return call.error ?? text('callFailed', 'Failed');
-  if (call.phase === 'ended') return text('callEnded', 'Call ended');
+  if (call.phase === 'ended') return text('callEnded', 'Ended');
   return '';
 }

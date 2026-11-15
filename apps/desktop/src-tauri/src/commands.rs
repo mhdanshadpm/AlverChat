@@ -11,11 +11,15 @@
 use alver_core::discovery::PeerBeacon;
 use alver_core::files::TransferState;
 use alver_core::groups::{GroupState, EVERYONE_GROUP_ID};
-use alver_core::payloads::{MAX_BODY_BYTES, MAX_REACTION_BYTES};
+use alver_core::payloads::kind as frame;
+use alver_core::payloads::{
+    AvatarDataPayload, AvatarRequestPayload, MessageDeletePayload, MessageEditPayload, MessageRef,
+    PinUpdatePayload, ReactionPayload, MAX_AVATAR_BYTES, MAX_BODY_BYTES, MAX_REACTION_BYTES,
+};
 use alver_core::rules::check_announcement_authority;
 use alver_core::security::{read_image_header, validate_received_file_name};
 use alver_core::storage::Store;
-use alver_core::store_ext::{self, Announcement, CallEvent, CallEventKind, PinnedMessage};
+use alver_core::store_ext::{self, Announcement, Avatar, CallEvent, CallEventKind, PinnedMessage};
 use alver_core::{Envelope, Hlc, Message, PROTOCOL_VERSION};
 use base64::Engine as _;
 use serde::Deserialize;
@@ -228,6 +232,7 @@ fn message_dto(
     message: &Message,
     replies: &BTreeMap<Uuid, Uuid>,
     unread: &HashSet<Uuid>,
+    peer_reads: &HashSet<Uuid>,
 ) -> Result<MessageDto, String> {
     let mine = message.sender == ME;
     // The transfer id doubles as the message id on every row this app writes, so the file
@@ -249,9 +254,13 @@ fn message_dto(
         },
         time: String::new(),
         mine,
-        // Only my own read state is known locally; a peer's ticks stay pending until
-        // the protocol carries read receipts back over the wire.
-        read: mine || !unread.contains(&message.id),
+        // My own ticks follow the peer's read receipt; their messages use my unread
+        // state, which is what draws the unread divider.
+        read: if mine {
+            peer_reads.contains(&message.id)
+        } else {
+            !unread.contains(&message.id)
+        },
         kind: if message.tombstone {
             "deleted".into()
         } else if has_file {
@@ -267,6 +276,10 @@ fn message_dto(
         } else {
             "delivered".into()
         },
+        // A revision row is the record that the body was replaced; a tombstone shows its own
+        // text instead, so an edit that was later unsend never claims to be editable.
+        edited: !message.tombstone && guard.revision_count(message.id)? > 0,
+        forwarded: message.forwarded,
     })
 }
 
@@ -282,16 +295,61 @@ fn unread_of(guard: &Store, chat_id: &str) -> Result<HashSet<Uuid>, String> {
         .collect())
 }
 
+/// My messages in a direct chat that the peer has marked read.
+///
+/// A group thread has no single reader, so its ticks stay at `delivered`.
+fn peer_reads_of(guard: &Store, chat_id: &str) -> Result<HashSet<Uuid>, String> {
+    if guard.get_group_state(chat_id)?.is_some() {
+        return Ok(HashSet::new());
+    }
+    guard.read_receipt_ids_for_chat(chat_id, ME, chat_id)
+}
+
 /// The thread of one chat, as the bridge reads it.
 pub(crate) fn message_dtos(app: &AppHandle, chat_id: &str) -> Result<Vec<MessageDto>, String> {
     let guard = store(app)?;
     let replies = replies_of(&guard, chat_id)?;
     let unread = unread_of(&guard, chat_id)?;
+    let peer_reads = peer_reads_of(&guard, chat_id)?;
     let mut out = Vec::new();
     for message in guard.messages_for_chat(chat_id)? {
-        out.push(message_dto(&guard, &message, &replies, &unread)?);
+        out.push(message_dto(
+            &guard,
+            &message,
+            &replies,
+            &unread,
+            &peer_reads,
+        )?);
     }
     Ok(out)
+}
+
+/// Whether a message this device writes is its own words or a copy of something from elsewhere.
+///
+/// A forward is a new message with an old body, and the copy has to say so: the bubble's
+/// "Forwarded" chip is the only thing that tells a reader the text was not written here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Origin {
+    Original,
+    Forwarded,
+}
+
+/// What every `message` frame carries, whichever audience it fans out to.
+///
+/// `forwarded` is the flag the bubble reads to say "Forwarded"; a copy keeps no link back
+/// to its source, so the only thing the wire needs to say is that it is a copy.
+fn message_payload(
+    body: &str,
+    reply_to: Option<Uuid>,
+    chat_id: &str,
+    forwarded: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "text": body,
+        "reply_to": reply_to.map(|id| id.to_string()),
+        "chat_id": chat_id,
+        "forwarded": forwarded,
+    })
 }
 
 /// Writes one outgoing message and queues it for its recipients.
@@ -304,6 +362,7 @@ fn outgoing(
     chat_id: &str,
     body: &str,
     reply_to: Option<Uuid>,
+    origin: Origin,
     strict: bool,
 ) -> Result<MessageDto, String> {
     let body = body.trim();
@@ -339,6 +398,7 @@ fn outgoing(
             return Err("This peer is no longer available on the local network.".into());
         }
     }
+    let forwarded = origin == Origin::Forwarded;
     let message = Message {
         id: Uuid::now_v7(),
         chat_id: chat_id.to_owned(),
@@ -349,6 +409,7 @@ fn outgoing(
             logical: 0,
         },
         tombstone: false,
+        forwarded,
     };
     let frames = if group {
         alver_core::groups::delivery_plan_for(&roster, &my_id, chat_id, epoch, message.id)
@@ -359,15 +420,11 @@ fn outgoing(
                     Envelope {
                         v: PROTOCOL_VERSION,
                         id: message.id,
-                        kind: "message".into(),
+                        kind: frame::MESSAGE.into(),
                         from: my_id.clone(),
                         to: target.recipient,
                         hlc: message.clock,
-                        payload: serde_json::json!({
-                            "text": message.body,
-                            "reply_to": reply_to.map(|id| id.to_string()),
-                            "chat_id": chat_id,
-                        }),
+                        payload: message_payload(&message.body, reply_to, chat_id, forwarded),
                     },
                 )
             })
@@ -378,15 +435,11 @@ fn outgoing(
             Envelope {
                 v: PROTOCOL_VERSION,
                 id: message.id,
-                kind: "message".into(),
+                kind: frame::MESSAGE.into(),
                 from: my_id.clone(),
                 to: chat_id.to_owned(),
                 hlc: message.clock,
-                payload: serde_json::json!({
-                    "text": message.body,
-                    "reply_to": reply_to.map(|id| id.to_string()),
-                    "chat_id": chat_id,
-                }),
+                payload: message_payload(&message.body, reply_to, chat_id, forwarded),
             },
         )]
     };
@@ -423,6 +476,7 @@ fn outgoing(
     if let Ok(mut peers) = app.state::<OverlayState>().peers.lock() {
         if let Some(peer) = peers.iter_mut().find(|peer| peer.id == chat_id) {
             peer.preview = message.body.clone();
+            peer.last_message_ms = message.clock.physical_ms;
         }
     }
     let _ = app.emit("messages-changed", chat_id);
@@ -430,7 +484,7 @@ fn outgoing(
     let guard = store(app)?;
     let replies = replies_of(&guard, chat_id)?;
     let unread = unread_of(&guard, chat_id)?;
-    message_dto(&guard, &message, &replies, &unread)
+    message_dto(&guard, &message, &replies, &unread, &HashSet::new())
 }
 
 /// Sends one composer message, quoting `reply_to_id` when the UI supplied one.
@@ -451,7 +505,7 @@ pub(crate) fn send_message(
         Some(raw) if raw.trim().is_empty() => None,
         Some(raw) => Some(parse_id(raw, "Reply target")?),
     };
-    outgoing(&app, chat_id.trim(), &text, quoted, true)
+    outgoing(&app, chat_id.trim(), &text, quoted, Origin::Original, true)
 }
 
 /// Drains the outbox of one reachable peer; a failure hands the peer to the retry loop.
@@ -490,16 +544,32 @@ fn reaction_tally(guard: &Store, message_id: Uuid) -> Result<Vec<ReactionTallyDt
         .collect())
 }
 
-fn pinned_dtos(guard: &Store, chat_id: &str, my_id: &str) -> Result<Vec<PinnedMessageDto>, String> {
+fn pinned_dtos(
+    app: &AppHandle,
+    guard: &Store,
+    chat_id: &str,
+) -> Result<Vec<PinnedMessageDto>, String> {
+    let all = names(app, guard);
     guard
         .pinned_for_chat(chat_id)?
         .into_iter()
         .map(
             |PinnedMessage {
-                 message, pinned_ms, ..
+                 message,
+                 pinned_ms,
+                 pinned_by,
+                 ..
              }| {
                 Ok(PinnedMessageDto {
-                    pinned_by: my_id.to_owned(),
+                    // Whichever device asked for the pin, recorded when it landed — this
+                    // device's own command or a peer's `pin_update` frame. A row written
+                    // before migration v7 has no author, and stays an empty string rather
+                    // than borrowing this device's name.
+                    pinned_by: if pinned_by.is_empty() {
+                        String::new()
+                    } else {
+                        name_of(&all, &pinned_by)
+                    },
                     pinned_ms,
                     message_id: message.id.to_string(),
                     chat_id: message.chat_id.clone(),
@@ -771,24 +841,40 @@ pub(crate) fn pin_message(
     let chat_id = parse_chat(&chat_id)?;
     let id = parse_id(&message_id, "Message id")?;
     let my_id = my_peer_id(&app);
-    let mut guard = store(&app)?;
-    let message = guard
-        .get_message(id)?
-        .ok_or("That message is not in this database.")?;
-    if message.chat_id != chat_id {
-        return Err("A message can only be pinned in its own chat.".into());
+    let position = {
+        let mut guard = store(&app)?;
+        let message = guard
+            .get_message(id)?
+            .ok_or("That message is not in this database.")?;
+        if message.chat_id != chat_id {
+            return Err("A message can only be pinned in its own chat.".into());
+        }
+        if pinned {
+            let position = guard
+                .pinned_for_chat(&chat_id)?
+                .iter()
+                .filter(|pin| pin.message.id != id)
+                .count() as u32;
+            guard.pin(id, position, now_ms(), &my_id)?;
+            position
+        } else {
+            guard.unpin(id)?;
+            0
+        }
+    };
+    // A pin is a claim about everyone's copy of the chat, which is why it travels: the list
+    // used to diverge quietly, one Pinned tab per device. `pinned_by` records who asked.
+    let payload = serde_json::to_value(PinUpdatePayload {
+        chat_id: chat_id.clone(),
+        message_id: id,
+        pinned,
+        position,
+    });
+    if let Ok(payload) = payload {
+        propagate_change(&app, &chat_id, frame::PIN_UPDATE, payload);
     }
-    if pinned {
-        let position = guard
-            .pinned_for_chat(&chat_id)?
-            .iter()
-            .filter(|pin| pin.message.id != id)
-            .count() as u32;
-        guard.pin(id, position, now_ms())?;
-    } else {
-        guard.unpin(id)?;
-    }
-    pinned_dtos(&guard, &chat_id, &my_id)
+    let guard = store(&app)?;
+    pinned_dtos(&app, &guard, &chat_id)
 }
 
 #[tauri::command]
@@ -797,9 +883,8 @@ pub(crate) fn pinned_messages(
     chat_id: String,
 ) -> Result<Vec<PinnedMessageDto>, String> {
     let chat_id = parse_chat(&chat_id)?;
-    let my_id = my_peer_id(&app);
     let guard = store(&app)?;
-    pinned_dtos(&guard, &chat_id, &my_id)
+    pinned_dtos(&app, &guard, &chat_id)
 }
 
 #[tauri::command]
@@ -823,9 +908,16 @@ pub(crate) fn starred_messages(app: AppHandle, chat_id: String) -> Result<Vec<Me
     let guard = store(&app)?;
     let replies = replies_of(&guard, &chat_id)?;
     let unread = unread_of(&guard, &chat_id)?;
+    let peer_reads = peer_reads_of(&guard, &chat_id)?;
     let mut out = Vec::new();
     for starred in guard.starred_for_chat(&chat_id)? {
-        out.push(message_dto(&guard, &starred.message, &replies, &unread)?);
+        out.push(message_dto(
+            &guard,
+            &starred.message,
+            &replies,
+            &unread,
+            &peer_reads,
+        )?);
     }
     Ok(out)
 }
@@ -854,16 +946,38 @@ pub(crate) fn react(
     if emoji.len() > MAX_REACTION_BYTES {
         return Err(format!("A reaction is at most {MAX_REACTION_BYTES} bytes."));
     }
-    let mut guard = store(&app)?;
-    let already = guard
-        .reactions_for_message(id)?
-        .iter()
-        .any(|reaction| reaction.peer_id == ME && reaction.emoji == emoji);
-    if already {
-        guard.remove_reaction(id, ME, &emoji)?;
-    } else {
-        guard.add_reaction(id, ME, &emoji, now_ms())?;
+    let (chat_id, changed, removed) = {
+        let mut guard = store(&app)?;
+        let chat_id = guard.get_message(id)?.map(|message| message.chat_id);
+        let already = guard
+            .reactions_for_message(id)?
+            .iter()
+            .any(|reaction| reaction.peer_id == ME && reaction.emoji == emoji);
+        let changed = if already {
+            guard.remove_reaction(id, ME, &emoji)?
+        } else {
+            guard.add_reaction(id, ME, &emoji, now_ms())?
+        };
+        (chat_id, changed, already)
+    };
+    // A chip that did not move on our own row has nothing to tell anyone; a real one has to
+    // reach every reader of the chat, or the two devices show different threads.
+    if changed {
+        if let Some(chat_id) = chat_id {
+            let payload = serde_json::to_value(ReactionPayload {
+                message: MessageRef {
+                    chat_id: chat_id.clone(),
+                    message_id: id,
+                },
+                emoji: emoji.clone(),
+                remove: removed,
+            });
+            if let Ok(payload) = payload {
+                propagate_change(&app, &chat_id, frame::REACTION, payload);
+            }
+        }
     }
+    let guard = store(&app)?;
     reaction_tally(&guard, id)
 }
 
@@ -895,7 +1009,7 @@ pub(crate) fn forward_messages(
         let chat_id = parse_chat(raw)?;
         for body in &bodies {
             // A copy loses its quote: the quoted id belongs to the source chat.
-            if outgoing(&app, &chat_id, body, None, false).is_ok() {
+            if outgoing(&app, &chat_id, body, None, Origin::Forwarded, false).is_ok() {
                 landed += 1;
             }
         }
@@ -957,31 +1071,41 @@ pub(crate) async fn set_typing(
 
 /// Typing is advisory: a peer that is not reachable simply does not see the indicator,
 /// so the frame is best-effort and its failure never reaches the composer.
+///
+/// The audience is the same one every other change to the chat is sent to, which is what
+/// makes a group indicator work: a group id is never a key in the endpoint map, because
+/// endpoints are per device, and looking a group up there used to answer "nobody to tell".
 fn set_typing_blocking(app: AppHandle, chat_id: String, typing: bool) -> Result<(), String> {
     let chat_id = parse_chat(&chat_id)?;
-    let beacon = app
+    let my_id = my_peer_id(&app);
+    let recipients = {
+        let guard = store(&app)?;
+        chat_audience(&guard, &chat_id, &my_id)
+    };
+    let endpoints = app
         .state::<OverlayState>()
         .endpoints
         .lock()
         .map_err(|_| "peer endpoint lock poisoned")?
-        .get(&chat_id)
-        .cloned();
-    let Some(beacon) = beacon else {
-        return Ok(());
-    };
-    let envelope = Envelope {
-        v: PROTOCOL_VERSION,
-        id: Uuid::now_v7(),
-        kind: "typing".into(),
-        from: my_peer_id(&app),
-        to: beacon.peer_id.clone(),
-        hlc: Hlc {
-            physical_ms: now_ms(),
-            logical: 0,
-        },
-        payload: serde_json::json!({"typing": typing}),
-    };
-    let _ = send_frame(&app, &beacon, &envelope);
+        .clone();
+    for peer in recipients {
+        let Some(beacon) = endpoints.get(&peer).cloned() else {
+            continue;
+        };
+        let envelope = Envelope {
+            v: PROTOCOL_VERSION,
+            id: Uuid::now_v7(),
+            kind: frame::TYPING.into(),
+            from: my_id.clone(),
+            to: peer,
+            hlc: Hlc {
+                physical_ms: now_ms(),
+                logical: 0,
+            },
+            payload: serde_json::json!({"typing": typing}),
+        };
+        let _ = send_frame(&app, &beacon, &envelope);
+    }
     Ok(())
 }
 
@@ -1018,6 +1142,7 @@ pub(crate) fn clear_chat(app: AppHandle, chat_id: String) -> Result<(), String> 
     if let Ok(mut peers) = app.state::<OverlayState>().peers.lock() {
         if let Some(peer) = peers.iter_mut().find(|peer| peer.id == chat_id) {
             peer.preview = String::new();
+            peer.last_message_ms = 0;
             peer.unread = None;
         }
     }
@@ -1064,6 +1189,16 @@ pub(crate) fn delete_for_everyone(app: AppHandle, message_id: String) -> Result<
     };
     drop(guard);
     if removed {
+        // The tombstone is only real once every device in the chat agrees to it, so the
+        // unsend travels before this device reports success.
+        let payload = serde_json::to_value(MessageDeletePayload {
+            message_id: id,
+            for_everyone: true,
+            reason: None,
+        });
+        if let Ok(payload) = payload {
+            propagate_change(&app, &chat_id, frame::MESSAGE_DELETE, payload);
+        }
         let _ = app.emit("messages-changed", chat_id);
         publish(&app);
     }
@@ -1174,18 +1309,19 @@ pub(crate) fn open_attachment(
     Ok(Some(opened))
 }
 
-/// The bytes of a downloaded attachment as a data URL, so audio can play inside the bubble.
+/// The bytes of a downloaded attachment as a data URL, so a voice note can play and a picture can
+/// show in the thread without a second protocol for serving files into the webview.
 #[tauri::command]
 pub(crate) fn attachment_data(
     app: AppHandle,
     attachment_id: String,
 ) -> Result<Option<String>, String> {
-    /// A voice note is small; the whole file crosses the IPC bridge to reach the webview.
+    /// Anything this small crosses the IPC bridge whole; larger files are opened, not inlined.
     const MAX_INLINE_BYTES: u64 = 16 * 1024 * 1024;
     let id = parse_id(&attachment_id, "Attachment id")?;
     let attachment = file_transfer::row_now(&app, id)?;
     if attachment.size_bytes > MAX_INLINE_BYTES {
-        return Err("That recording is too large to play inside the app.".into());
+        return Err("That file is too large to open inside the app.".into());
     }
     let path = file_transfer::file_path(&app, &attachment)?;
     let bytes = std::fs::read(&path).map_err(|error| format!("Cannot read the file: {error}"))?;
@@ -1496,11 +1632,12 @@ pub(crate) fn acknowledge_announcement(
     let all = names(&app, &guard);
     let dto = announcement_dto(&guard, &announcement, &all).map(Some)?;
     drop(guard);
+    crate::refresh_announcement_bubbles(&app);
     if !already && announcement.sender != my_id {
         let envelope = Envelope {
             v: PROTOCOL_VERSION,
             id: Uuid::now_v7(),
-            kind: "announcement_ack".into(),
+            kind: frame::ANNOUNCEMENT_ACK.into(),
             from: my_id.clone(),
             to: announcement.sender.clone(),
             hlc: Hlc {
@@ -1521,9 +1658,26 @@ pub(crate) fn acknowledge_announcement(
 // Group and announcement transport.
 // ------------------------------------------------------------------------------------
 
-/// Roster, announcement and acknowledgement frames the peer session must accept.
+/// The kinds this build takes ownership of inside the session reader.
+///
+/// Anything outside this list and outside the core, file and call sets ends the session,
+/// so every name here has to be a type the protocol declares. `frame_table_tests` in
+/// `main.rs` checks both directions against the table rather than against a second copy.
+pub(crate) const OWNED_KINDS: &[&str] = &[
+    frame::GROUP_STATE,
+    frame::ANNOUNCEMENT,
+    frame::ANNOUNCEMENT_ACK,
+    frame::AVATAR_REQUEST,
+    frame::AVATAR_DATA,
+    frame::MESSAGE_EDIT,
+    frame::MESSAGE_DELETE,
+    frame::REACTION,
+    frame::PIN_UPDATE,
+];
+
+/// Roster, announcement, avatar and thread frames the peer session must accept.
 pub(crate) fn handled_kind(kind: &str) -> bool {
-    matches!(kind, "group" | "announcement" | "announcement_ack")
+    OWNED_KINDS.contains(&kind)
 }
 
 /// Fans a signed roster out to every member (and to peers the change removed).
@@ -1547,7 +1701,7 @@ fn deliver_group_state(app: &AppHandle, state: &GroupState, previous: &[String])
                 Envelope {
                     v: PROTOCOL_VERSION,
                     id: Uuid::now_v7(),
-                    kind: "group".into(),
+                    kind: frame::GROUP_STATE.into(),
                     from: my_id.clone(),
                     to,
                     hlc: Hlc {
@@ -1562,6 +1716,21 @@ fn deliver_group_state(app: &AppHandle, state: &GroupState, previous: &[String])
     queue_frames(app, frames);
 }
 
+/// What an `announcement` frame carries, under the keys `handle_announcement_frame` reads.
+///
+/// Split out of `deliver_announcement` so a test can hand the declared protocol table the bytes
+/// this writer actually produces: the table and the wire used to disagree about `text` here,
+/// exactly as they did for a `message` frame, and a round-trip fixture could not see it.
+fn announcement_payload(announcement: &Announcement) -> serde_json::Value {
+    serde_json::json!({
+        "announcement_id": announcement.id.to_string(),
+        "group_id": announcement.group_id.clone(),
+        "text": announcement.body.clone(),
+        "created_ms": announcement.created_ms,
+        "admins_only": announcement.admins_only,
+    })
+}
+
 /// Queues one announcement frame per other member of its group roster.
 fn deliver_announcement(app: &AppHandle, announcement: &Announcement, members: &[String]) {
     let my_id = my_peer_id(app);
@@ -1570,6 +1739,7 @@ fn deliver_announcement(app: &AppHandle, announcement: &Announcement, members: &
         .filter(|member| member.as_str() != my_id)
         .cloned()
         .collect();
+    let payload = announcement_payload(announcement);
     let frames: Vec<(String, Envelope<serde_json::Value>)> = recipients
         .into_iter()
         .map(|to| {
@@ -1578,17 +1748,11 @@ fn deliver_announcement(app: &AppHandle, announcement: &Announcement, members: &
                 Envelope {
                     v: PROTOCOL_VERSION,
                     id: Uuid::now_v7(),
-                    kind: "announcement".into(),
+                    kind: frame::ANNOUNCEMENT.into(),
                     from: my_id.clone(),
                     to,
                     hlc: announcement.clock,
-                    payload: serde_json::json!({
-                        "announcement_id": announcement.id.to_string(),
-                        "group_id": announcement.group_id.clone(),
-                        "text": announcement.body.clone(),
-                        "created_ms": announcement.created_ms,
-                        "admins_only": announcement.admins_only,
-                    }),
+                    payload: payload.clone(),
                 },
             )
         })
@@ -1738,6 +1902,7 @@ pub(crate) fn handle_announcement_frame(
     })?;
     drop(guard);
     if saved {
+        crate::refresh_announcement_bubbles(app);
         let _ = app.emit("messages-changed", group_id.to_owned());
     }
     Ok(())
@@ -1821,4 +1986,1044 @@ pub(crate) fn get_avatar(app: AppHandle) -> Result<Option<String>, String> {
     Ok(guard
         .avatar_for_peer(&my_id)?
         .map(|avatar| encode_avatar_url(&avatar.media_type, &avatar.bytes)))
+}
+
+/// The photo a peer has published, as this device last verified it.
+#[tauri::command]
+pub(crate) fn peer_avatar(app: AppHandle, peer_id: String) -> Result<Option<String>, String> {
+    let peer_id = parse_chat(&peer_id)?;
+    let guard = store(&app)?;
+    Ok(guard
+        .avatar_for_peer(&peer_id)?
+        .map(|avatar| encode_avatar_url(&avatar.media_type, &avatar.bytes)))
+}
+
+/// A blake3 digest the way the wire carries it: sixty-four hex characters.
+fn is_avatar_hash(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// The hash of the photo this profile publishes, which is what a heartbeat pong offers to a
+/// peer. `None` when the profile has no photo, which the pong says as an empty string.
+pub(crate) fn my_avatar_hash(app: &AppHandle) -> Option<String> {
+    let my_id = my_peer_id(app);
+    store(app)
+        .ok()?
+        .avatar_for_peer(&my_id)
+        .ok()
+        .flatten()
+        .map(|avatar| avatar.hash)
+}
+
+/// What a peer's declared avatar hash means for the copy this device holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AvatarAction {
+    /// The peer declared nothing — an older build, or one whose profile is private. The
+    /// cached copy is left alone rather than emptied on a guess.
+    Ignore,
+    /// Nothing to do: we already hold what the peer declared, or it has none and we do not
+    /// either.
+    Keep,
+    /// The peer publishes something we do not have. Ask for it.
+    Pull,
+    /// The peer says it publishes nothing, so stop drawing the photo it used to share.
+    Forget,
+}
+
+/// The decision, split out so a test can drive every combination of a declared hash against
+/// the states the cache can be in.
+pub(crate) fn avatar_action(declared: Option<&str>, cached: Option<&str>) -> AvatarAction {
+    let Some(declared) = declared.map(str::trim) else {
+        return AvatarAction::Ignore;
+    };
+    if declared.is_empty() {
+        return if cached.is_some() {
+            AvatarAction::Forget
+        } else {
+            AvatarAction::Keep
+        };
+    }
+    if !is_avatar_hash(declared) {
+        return AvatarAction::Ignore;
+    }
+    if cached == Some(declared) {
+        AvatarAction::Keep
+    } else {
+        AvatarAction::Pull
+    }
+}
+
+/// Folds one heartbeat reply's avatar declaration into this device's cache: pull what the
+/// peer offers, drop what it withdraws.
+///
+/// Only ever a response to a frame that peer sent us on a session it holds, so a peer that
+/// stops beating keeps the copy we have until it says otherwise.
+pub(crate) fn sync_peer_avatar(app: &AppHandle, peer_id: &str, payload: &serde_json::Value) {
+    let declared = payload
+        .get("avatar")
+        .and_then(serde_json::Value::as_str)
+        .map(|value| value.trim().to_owned());
+    let cached = {
+        let Ok(guard) = store(app) else {
+            return;
+        };
+        guard
+            .avatar_for_peer(peer_id)
+            .ok()
+            .flatten()
+            .map(|avatar| avatar.hash)
+    };
+    match avatar_action(declared.as_deref(), cached.as_deref()) {
+        AvatarAction::Ignore | AvatarAction::Keep => {}
+        AvatarAction::Forget => {
+            let cleared = {
+                let Ok(mut guard) = store(app) else {
+                    return;
+                };
+                guard.forget_avatar(peer_id).unwrap_or(false)
+            };
+            if cleared {
+                let _ = app.emit("avatars-changed", peer_id.to_owned());
+            }
+        }
+        AvatarAction::Pull => {
+            let my_id = my_peer_id(app);
+            let Ok(payload) = serde_json::to_value(AvatarRequestPayload {
+                peer_id: my_id.clone(),
+                have_hash: cached,
+            }) else {
+                return;
+            };
+            queue_frames(
+                app,
+                vec![(
+                    peer_id.to_owned(),
+                    Envelope {
+                        v: PROTOCOL_VERSION,
+                        id: Uuid::now_v7(),
+                        kind: frame::AVATAR_REQUEST.into(),
+                        from: my_id,
+                        to: peer_id.to_owned(),
+                        hlc: Hlc {
+                            physical_ms: now_ms(),
+                            logical: 0,
+                        },
+                        payload,
+                    },
+                )],
+            );
+        }
+    }
+}
+
+/// Answers a peer's request for this profile's photo.
+///
+/// The reply rides the durable outbox like every other unsolicited frame, so a peer that is
+/// briefly unreachable still gets it. An answer this device cannot carry is simply withheld:
+/// the requester asks again on the next heartbeat rather than receiving half a file.
+pub(crate) fn handle_avatar_request(
+    app: &AppHandle,
+    remote: &str,
+    envelope: &Envelope<serde_json::Value>,
+) -> Result<(), String> {
+    let request: AvatarRequestPayload = serde_json::from_value(envelope.payload.clone())
+        .map_err(|_| "avatar request is malformed".to_owned())?;
+    if request.peer_id != remote {
+        return Err("avatar request names a peer other than the one that sent it".into());
+    }
+    // A profile that hides its status from the network hides its face too: the photo is part
+    // of the same declaration a pong carries, so the same switch must decide both, or a
+    // direct request would be a way to read what "Nobody" was meant to keep private.
+    if platform::status_is_private(&platform::load_settings(app).who_sees_status) {
+        return Ok(());
+    }
+    let my_id = my_peer_id(app);
+    let mine = {
+        let guard = store(app)?;
+        guard.avatar_for_peer(&my_id)?
+    };
+    let Some(avatar) = mine else {
+        return Ok(());
+    };
+    let have = request
+        .have_hash
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    if have.as_deref() == Some(avatar.hash.as_str()) || avatar.bytes.len() > MAX_AVATAR_BYTES {
+        return Ok(());
+    }
+    let Ok(payload) = serde_json::to_value(AvatarDataPayload {
+        peer_id: my_id.clone(),
+        hash: avatar.hash,
+        media_type: avatar.media_type.to_owned(),
+        width: avatar.width,
+        height: avatar.height,
+        bytes: avatar.bytes.clone(),
+    }) else {
+        return Ok(());
+    };
+    queue_frames(
+        app,
+        vec![(
+            remote.to_owned(),
+            Envelope {
+                v: PROTOCOL_VERSION,
+                id: Uuid::now_v7(),
+                kind: frame::AVATAR_DATA.into(),
+                from: my_id,
+                to: remote.to_owned(),
+                hlc: Hlc {
+                    physical_ms: now_ms(),
+                    logical: 0,
+                },
+                payload,
+            },
+        )],
+    );
+    Ok(())
+}
+
+/// Caches a photo a peer sent, but only from the peer that declared it and only after the
+/// bytes hash to the digest the offer carries.
+pub(crate) fn handle_avatar_data(
+    app: &AppHandle,
+    remote: &str,
+    envelope: &Envelope<serde_json::Value>,
+) -> Result<(), String> {
+    let data: AvatarDataPayload = serde_json::from_value(envelope.payload.clone())
+        .map_err(|_| "avatar data is malformed".to_owned())?;
+    if data.peer_id != remote {
+        return Err("avatar data came from a peer other than the one it names".into());
+    }
+    // An empty body is the "nothing changed" answer to a request the peer no longer needs to
+    // satisfy; there is nothing to verify and nothing to store.
+    if data.bytes.is_empty() {
+        return Ok(());
+    }
+    if data.bytes.len() > MAX_AVATAR_BYTES {
+        return Err("avatar payload is larger than a control frame carries".into());
+    }
+    if !is_avatar_hash(data.hash.trim()) {
+        return Err("avatar offer carries no usable hash".into());
+    }
+    let stored = {
+        let mut guard = store(app)?;
+        guard.cache_offered_avatar(&Avatar {
+            peer_id: remote.to_owned(),
+            media_type: data.media_type,
+            width: data.width,
+            height: data.height,
+            hash: data.hash,
+            bytes: data.bytes,
+            updated_ms: now_ms(),
+        })?
+    };
+    let _ = app.emit("avatars-changed", stored.peer_id);
+    Ok(())
+}
+
+// ------------------------------------------------------------------------------------
+// Thread convergence: edits, unsends and reactions.
+// ------------------------------------------------------------------------------------
+
+/// How far ahead of this device's clock a peer's frame may run before it is refused.
+const MAX_CLOCK_SKEW_MS: u64 = 5 * 60 * 1000;
+
+/// The readers whose copy of a chat has to hear that something inside it changed.
+///
+/// Pure so a test can prove a group change reaches the whole roster, a direct one names
+/// exactly the peer at the other end, and no device is ever queued a frame to itself.
+pub(crate) fn thread_audience(candidates: &[String], my_id: &str) -> Vec<String> {
+    candidates
+        .iter()
+        .filter(|peer| peer.as_str() != my_id)
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// Every other reader of a chat: its roster when it is a group, its one peer when it is not.
+fn chat_audience(guard: &Store, chat_id: &str, my_id: &str) -> Vec<String> {
+    let candidates = if is_group(guard, chat_id) {
+        roster_of(guard, chat_id, my_id)
+    } else {
+        vec![chat_id.to_owned()]
+    };
+    thread_audience(&candidates, my_id)
+}
+
+/// True when `peer` is one of the readers whose copy of a chat this device keeps in step.
+///
+/// This is `chat_audience` read in the other direction, and that symmetry is the point: the
+/// set a change is sent to is exactly the set allowed to send it. A frame naming a chat its
+/// sender is not part of is not a claim about a shared thread, and a thread frame is dropped
+/// rather than refused outright because a stranger naming one of our chats is a bug to be
+/// survived, not a reason to redial forever.
+pub(crate) fn shares_chat(audience: &[String], peer: &str) -> bool {
+    audience.iter().any(|member| member == peer)
+}
+
+/// Which of this device's chats a frame's `chat_id` names.
+///
+/// A direct thread is stored under the id of the peer at the other end, so the same
+/// conversation has two names: the sender calls it ours, and we call it theirs. A thread frame
+/// about a 1:1 chat therefore always arrives naming our own id, and comparing that name as it
+/// stands matches nothing — which is how a reaction or a pin could cross the wire, be acked,
+/// and still never appear. A frame that names nothing, or names us, is about the thread with
+/// the peer we heard it from; a group id is the same on every device and passes through.
+pub(crate) fn thread_chat_id(named: &str, my_id: &str, remote: &str) -> String {
+    if named.is_empty() || named == my_id {
+        remote.to_owned()
+    } else {
+        named.to_owned()
+    }
+}
+
+/// Which of this device's chats a frame leaving for a peer belongs to.
+///
+/// `messages-changed` carries a thread id, and the shell clears unread on it, so it must not
+/// carry a device id. Every fan-out row is addressed to one *member* in `to` — a group post, an
+/// announcement, a reaction, a pin, an edit, a delete — while the thread they belong to is the
+/// group. Handing out `to` therefore named an unrelated 1:1 chat whenever a group frame flushed
+/// to that peer, and the compact rail's group row never ticked for the post it was about. The
+/// writers already name the thread in the payload; an edit or a delete is about a message this
+/// device has, so its own row says where it lives. `to` stays the last resort, and for a direct
+/// frame `to` and the thread are the same id by definition.
+///
+/// Takes the store lock, so callers must not hold it.
+pub(crate) fn frame_thread(app: &AppHandle, envelope: &Envelope<serde_json::Value>) -> String {
+    let stored = referenced_message(envelope).and_then(|id| message_chat(app, id));
+    thread_from_names(payload_thread(envelope), stored, &envelope.to)
+}
+
+/// The precedence the answer is built from: what the payload names, then what the store says
+/// about the message the frame is about, then the recipient — which for a direct row is the
+/// thread, and for anything else is only the best guess left.
+fn thread_from_names(named: Option<String>, stored: Option<String>, recipient: &str) -> String {
+    named.or(stored).unwrap_or_else(|| recipient.to_owned())
+}
+
+/// The thread a frame's own payload names, when it names one.
+///
+/// Split out from `frame_thread` so the shapes can be pinned against the writers that produce
+/// them: every key here is what `serde_json::to_value` of the corresponding payload struct, or
+/// `message_payload`, actually puts on the wire.
+fn payload_thread(envelope: &Envelope<serde_json::Value>) -> Option<String> {
+    let payload = &envelope.payload;
+    let named = |key: &str| {
+        payload
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+    };
+    let in_message = |key: &str| {
+        payload
+            .get("message")
+            .and_then(|message| message.get(key))
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+    };
+    named("chat_id")
+        .or_else(|| named("group_id"))
+        .or_else(|| in_message("chat_id"))
+}
+
+/// The stored message a thread frame is about, when it names one.
+fn referenced_message(envelope: &Envelope<serde_json::Value>) -> Option<Uuid> {
+    let raw = |key: &str| {
+        envelope
+            .payload
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| {
+                envelope
+                    .payload
+                    .get("message")
+                    .and_then(|message| message.get(key))
+                    .and_then(serde_json::Value::as_str)
+            })
+    };
+    raw("message_id").and_then(|id| Uuid::parse_str(id).ok())
+}
+
+/// Queues one thread frame per reader of its chat so their copies converge on ours.
+///
+/// The durable outbox owns every reader that is not reachable right now, so a reaction made
+/// while a peer is away still arrives when it reappears — and the UI is never made to wait on
+/// a handshake.
+fn propagate_change(app: &AppHandle, chat_id: &str, kind: &str, payload: serde_json::Value) {
+    let my_id = my_peer_id(app);
+    let recipients = {
+        let Ok(guard) = store(app) else {
+            return;
+        };
+        chat_audience(&guard, chat_id, &my_id)
+    };
+    let stamp = now_ms();
+    let frames = recipients
+        .into_iter()
+        .map(|to| {
+            (
+                to.clone(),
+                Envelope {
+                    v: PROTOCOL_VERSION,
+                    id: Uuid::now_v7(),
+                    kind: kind.to_owned(),
+                    from: my_id.clone(),
+                    to,
+                    hlc: Hlc {
+                        physical_ms: stamp,
+                        logical: 0,
+                    },
+                    payload: payload.clone(),
+                },
+            )
+        })
+        .collect();
+    queue_frames(app, frames);
+}
+
+/// The chat one stored message lives in, or `None` when this device does not have it.
+pub(crate) fn message_chat(app: &AppHandle, message_id: Uuid) -> Option<String> {
+    store(app)
+        .ok()?
+        .get_message(message_id)
+        .ok()
+        .flatten()
+        .map(|message| message.chat_id)
+}
+
+/// Carries an edit this device made to the thread's other readers.
+///
+/// The composer's command lives in the shell, so this is the seam it calls once its own store
+/// write has landed. The frame carries the same clock the local revision was written under,
+/// which is what lets both copies agree on what replaced what.
+pub(crate) fn propagate_edit(app: &AppHandle, message_id: Uuid, body: &str, clock: Hlc) {
+    let Some(chat_id) = message_chat(app, message_id) else {
+        return;
+    };
+    let Ok(payload) = serde_json::to_value(MessageEditPayload {
+        message_id,
+        body: body.to_owned(),
+        clock,
+    }) else {
+        return;
+    };
+    propagate_change(app, &chat_id, frame::MESSAGE_EDIT, payload);
+}
+
+/// How far a peer's clock may be ahead and still be believed.
+///
+/// The bound is the one every incoming message is held to: past it, an "edit" would be a way
+/// to move a message to a time that has not happened, so it is refused instead of stored.
+pub(crate) fn clock_is_plausible(physical_ms: u64, now_ms: u64) -> bool {
+    physical_ms <= now_ms.saturating_add(MAX_CLOCK_SKEW_MS)
+}
+
+/// What an inbound `message_delete` asks this device to do.
+///
+/// Delete-for-me is a claim about the sender's *own* history; honouring it here would let any
+/// peer erase a message from a device that never agreed to it. Only the durable
+/// delete-for-everyone path converges, and this device never sends the other one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UnsendAction {
+    /// Retire the message on every device in the chat.
+    Tombstone,
+    /// A delete-for-me request, which changes nothing here.
+    Ignore,
+}
+
+pub(crate) fn unsend_action(for_everyone: bool) -> UnsendAction {
+    if for_everyone {
+        UnsendAction::Tombstone
+    } else {
+        UnsendAction::Ignore
+    }
+}
+
+/// Applies a peer's edit of a message that peer sent.
+///
+/// The store owns the authority and the permanence rule and is handed the session peer as the
+/// actor, so a frame rewriting someone else's words — or a message already tombstoned or
+/// purged — is refused there and lands here as a no-op. A refusal is not a session fault: two
+/// devices whose histories diverged should keep talking rather than drop each other.
+pub(crate) fn handle_message_edit(
+    app: &AppHandle,
+    remote: &str,
+    envelope: &Envelope<serde_json::Value>,
+) -> Result<(), String> {
+    let edit: MessageEditPayload = serde_json::from_value(envelope.payload.clone())
+        .map_err(|error| format!("message_edit frame is malformed: {error}"))?;
+    if edit.body.is_empty() || edit.body.len() > MAX_BODY_BYTES {
+        return Err("edited message text is outside the supported size".into());
+    }
+    if !clock_is_plausible(edit.clock.physical_ms, now_ms()) {
+        return Err("edit timestamp is too far in the future".into());
+    }
+    let (applied, chat_id) = {
+        let mut guard = store(app)?;
+        let chat_id = guard
+            .get_message(edit.message_id)?
+            .map(|message| message.chat_id);
+        let applied = guard.edit_message(edit.message_id, remote, &edit.body, edit.clock)?;
+        (applied, chat_id)
+    };
+    if applied {
+        if let Some(chat_id) = chat_id {
+            refresh_thread(app, &chat_id);
+        }
+    }
+    Ok(())
+}
+
+/// Retires one message on this device because the chat agreed it should be gone.
+pub(crate) fn handle_message_delete(
+    app: &AppHandle,
+    remote: &str,
+    envelope: &Envelope<serde_json::Value>,
+) -> Result<(), String> {
+    let delete: MessageDeletePayload = serde_json::from_value(envelope.payload.clone())
+        .map_err(|error| format!("message_delete frame is malformed: {error}"))?;
+    if unsend_action(delete.for_everyone) == UnsendAction::Ignore {
+        return Ok(());
+    }
+    let (removed, chat_id) = {
+        let mut guard = store(app)?;
+        let chat_id = guard
+            .get_message(delete.message_id)?
+            .map(|message| message.chat_id);
+        // A sender unsending their own message is the ordinary case. The second call is the
+        // same rule this device applies to itself, so a group admin's moderation converges on
+        // the members they moderate and nowhere else.
+        let tombstoned = guard.tombstone_message(delete.message_id, remote)?;
+        let removed = match (tombstoned, &chat_id) {
+            (true, _) => true,
+            (false, Some(chat_id)) => guard
+                .admin_tombstone_in_group(delete.message_id, remote, chat_id)
+                .unwrap_or(false),
+            (false, None) => false,
+        };
+        (removed, chat_id)
+    };
+    if removed {
+        if let Some(chat_id) = chat_id {
+            refresh_thread(app, &chat_id);
+        }
+    }
+    Ok(())
+}
+
+/// Draws or clears one peer's reaction chip.
+pub(crate) fn handle_reaction(
+    app: &AppHandle,
+    remote: &str,
+    envelope: &Envelope<serde_json::Value>,
+) -> Result<(), String> {
+    let reaction: ReactionPayload = serde_json::from_value(envelope.payload.clone())
+        .map_err(|error| format!("reaction frame is malformed: {error}"))?;
+    let emoji = reaction.emoji.trim().to_owned();
+    if emoji.is_empty() || emoji.len() > MAX_REACTION_BYTES {
+        return Err("reaction is outside the supported size".into());
+    }
+    let (changed, chat_id) = {
+        let mut guard = store(app)?;
+        let my_id = my_peer_id(app);
+        // The frame never names who reacted — the authenticated session does — so a peer can
+        // only ever write its own name onto a chip. The chat it does name has to be resolved
+        // into ours first, because a direct thread is named by whoever is not reading the
+        // frame; then it has to match the one this device stores the message under, or an id
+        // from one thread could paint a chip in another. The peer also has to be one of that
+        // chat's readers, or a stranger could decorate a thread it was never in.
+        let named = thread_chat_id(&reaction.message.chat_id, &my_id, remote);
+        let known = guard
+            .get_message(reaction.message.message_id)?
+            .filter(|message| message.chat_id == named)
+            .map(|message| message.chat_id);
+        let allowed = known
+            .as_ref()
+            .is_some_and(|chat| shares_chat(&chat_audience(&guard, chat, &my_id), remote));
+        let changed = if !allowed {
+            false
+        } else if reaction.remove {
+            guard.remove_reaction(reaction.message.message_id, remote, &emoji)?
+        } else {
+            guard.add_reaction(reaction.message.message_id, remote, &emoji, now_ms())?
+        };
+        (changed, known)
+    };
+    if changed {
+        if let Some(chat_id) = chat_id {
+            refresh_thread(app, &chat_id);
+        }
+    }
+    Ok(())
+}
+
+/// Pins or unpins one message because a reader of its chat asked for it.
+///
+/// The sender's `position` is taken as given: two devices that pin into the same chat at the
+/// same moment can end up agreeing on the list and disagreeing on its order, and the next pin
+/// from either side settles it. That is a cosmetic difference in a shared list, which is a
+/// better outcome than this device keeping a private copy it never tells anyone about.
+pub(crate) fn handle_pin_update(
+    app: &AppHandle,
+    remote: &str,
+    envelope: &Envelope<serde_json::Value>,
+) -> Result<(), String> {
+    let pin: PinUpdatePayload = serde_json::from_value(envelope.payload.clone())
+        .map_err(|error| format!("pin_update frame is malformed: {error}"))?;
+    if envelope.payload.get("pinned").is_none() {
+        // `pinned` has a serde default, so a frame that leaves it out would read as an unpin
+        // and quietly take a pin away. The field is the whole point of the frame.
+        return Err("pin_update frame has no flag".into());
+    }
+    let my_id = my_peer_id(app);
+    let (changed, chat_id) = {
+        let mut guard = store(app)?;
+        let named = thread_chat_id(&pin.chat_id, &my_id, remote);
+        let known = guard
+            .get_message(pin.message_id)?
+            .filter(|message| message.chat_id == named)
+            .map(|message| message.chat_id);
+        let allowed = known
+            .as_ref()
+            .is_some_and(|chat| shares_chat(&chat_audience(&guard, chat, &my_id), remote));
+        let changed = if !allowed {
+            false
+        } else if pin.pinned {
+            guard.pin(pin.message_id, pin.position, now_ms(), remote)?
+        } else {
+            guard.unpin(pin.message_id)?
+        };
+        (changed, known)
+    };
+    if changed {
+        if let Some(chat_id) = chat_id {
+            refresh_thread(app, &chat_id);
+        }
+    }
+    Ok(())
+}
+
+/// Repaints a thread after a peer changed it, and refreshes the rail it is listed in.
+fn refresh_thread(app: &AppHandle, chat_id: &str) {
+    let _ = app.emit("messages-changed", chat_id.to_owned());
+    publish(app);
+}
+
+#[cfg(test)]
+mod thread_chat_id_tests {
+    use super::thread_chat_id;
+
+    const ANU: &str = "anu";
+    const BALA: &str = "bala";
+    const CY: &str = "cy";
+    const DESIGN_TEAM: &str = "group-design";
+
+    /// The rule both devices have to agree on: each stores a direct thread under the other
+    /// end's id, so each receives the same thread named with its own.
+    #[test]
+    fn a_direct_thread_arrives_named_with_the_reader_s_own_id() {
+        // Anu stores this thread under Bala's id and sends that id; Bala reads it back as its
+        // thread with Anu, which is where Bala actually keeps the message.
+        assert_eq!(thread_chat_id(BALA, BALA, ANU), ANU);
+        assert_eq!(thread_chat_id(ANU, ANU, BALA), BALA);
+    }
+
+    /// A group id is the same string on every device, so it is the thread's name as it stands.
+    #[test]
+    fn a_group_thread_keeps_its_name() {
+        assert_eq!(thread_chat_id(DESIGN_TEAM, ANU, BALA), DESIGN_TEAM);
+    }
+
+    /// A frame that names nothing is about the session it came in on, and a frame that names a
+    /// third peer is about a thread this device will not find — passing it through unchanged is
+    /// what keeps the lookup honest instead of quietly redirecting a stranger's id.
+    #[test]
+    fn an_unnamed_frame_falls_back_to_the_sender_and_a_foreign_name_survives() {
+        assert_eq!(thread_chat_id("", ANU, BALA), BALA);
+        assert_eq!(thread_chat_id(CY, ANU, BALA), CY);
+    }
+}
+
+#[cfg(test)]
+mod message_payload_tests {
+    use super::{frame, message_payload};
+    use crate::forwarded_of;
+    use alver_core::payloads::{classify, Payload};
+    use alver_core::{Envelope, Hlc, PROTOCOL_VERSION};
+    use serde_json::{json, Value};
+    use uuid::Uuid;
+
+    fn envelope(payload: Value) -> Envelope<Value> {
+        Envelope {
+            v: PROTOCOL_VERSION,
+            id: Uuid::now_v7(),
+            kind: frame::MESSAGE.into(),
+            from: "peer-a".into(),
+            to: "peer-b".into(),
+            hlc: Hlc {
+                physical_ms: 1,
+                logical: 0,
+            },
+            payload,
+        }
+    }
+
+    /// The two halves of one agreement: the key `outgoing` writes into a `message` frame is
+    /// the key the session reader reads off it. Testing a hand-written payload on both sides
+    /// would pass even if the writer had renamed the key.
+    #[test]
+    fn the_copy_flag_arrives_as_the_flag_the_reader_reads() {
+        assert!(forwarded_of(&envelope(message_payload(
+            "copy of a message",
+            None,
+            "chat-1",
+            true,
+        ))));
+        assert!(!forwarded_of(&envelope(message_payload(
+            "written here",
+            None,
+            "chat-1",
+            false,
+        ))));
+    }
+
+    /// What an older build looks like from this side: no key at all, which means an original
+    /// message rather than a frame to refuse.
+    #[test]
+    fn a_frame_without_the_key_is_an_original() {
+        assert!(!forwarded_of(&envelope(
+            json!({"text": "hi", "chat_id": "chat-1"})
+        )));
+        // A key of the wrong type is read the same way, and never fails the message.
+        assert!(!forwarded_of(&envelope(json!({"forwarded": "yes"}))));
+    }
+
+    #[test]
+    fn a_forwarded_quote_keeps_both_pointers() {
+        let quoted = Uuid::now_v7();
+        let payload = message_payload("answering that", Some(quoted), "group-design", true);
+        assert_eq!(payload["reply_to"], quoted.to_string());
+        assert_eq!(payload["chat_id"], "group-design");
+        assert!(forwarded_of(&envelope(payload)));
+    }
+
+    /// The declared protocol table parses the same keys this writer produces. A test holding
+    /// its own hand-written payload would keep passing while the table refused the frames the
+    /// app actually sends, which is exactly how `text` and `body` drifted apart here.
+    #[test]
+    fn the_frame_this_writer_produces_is_a_message_to_the_protocol_table() {
+        let quoted = Uuid::now_v7();
+        let payload = message_payload("a copy of something", Some(quoted), "group-design", true);
+        match classify(&envelope(payload)) {
+            Payload::Message(message) => {
+                assert_eq!(message.text, "a copy of something");
+                assert_eq!(message.chat_id, "group-design");
+                assert_eq!(message.reply_to, Some(quoted));
+                assert!(message.forwarded);
+            }
+            other => {
+                panic!("the desktop's own message frame must classify as a message, got {other:?}")
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod chat_audience_tests {
+    use super::{chat_audience, shares_chat, EVERYONE_GROUP_ID};
+    use alver_core::groups::GroupState;
+    use alver_core::identity::Identity;
+    use alver_core::storage::Store;
+
+    /// Typing, reactions and pins all ask this one question, so it is the whole difference
+    /// between a frame that reaches a group and a frame addressed to the group id itself —
+    /// which is no session anybody is holding.
+    #[test]
+    fn a_group_is_its_roster_and_never_its_own_id() {
+        let me = Identity::from_secret([1; 32]);
+        let my_id = me.peer_id();
+        let state = GroupState::create(
+            &me,
+            "group-design".into(),
+            "Design".into(),
+            [my_id.clone(), "peer-b".into(), "peer-c".into()],
+        )
+        .expect("a roster holding its admin");
+        let mut store = Store::open(":memory:", &[7; 32]).unwrap();
+        store.save_group_state(&state).unwrap();
+
+        let audience = chat_audience(&store, "group-design", &my_id);
+        assert_eq!(audience, vec!["peer-b".to_owned(), "peer-c".to_owned()]);
+        assert!(
+            !shares_chat(&audience, "group-design"),
+            "nobody can be sent a frame addressed to a group"
+        );
+        assert!(shares_chat(&audience, "peer-b"));
+    }
+
+    /// The automatic all-peers group has no stored roster, so its audience is whoever this
+    /// device has discovered — the common case for a LAN chat, and the same fan-out typing uses.
+    #[test]
+    fn the_everyone_group_is_every_discovered_peer_but_oneself() {
+        let me = Identity::from_secret([2; 32]);
+        let my_id = me.peer_id();
+        let other = Identity::from_secret([3; 32]);
+        let mut store = Store::open(":memory:", &[8; 32]).unwrap();
+        store
+            .save_peer(
+                &other.peer_id(),
+                "Robin",
+                &other.verifying_key().to_bytes(),
+                10,
+            )
+            .unwrap();
+        assert_eq!(
+            chat_audience(&store, EVERYONE_GROUP_ID, &my_id),
+            vec![other.peer_id()]
+        );
+    }
+
+    /// A direct thread is the peer at the other end, and a device never queues itself a frame.
+    #[test]
+    fn a_direct_thread_is_the_peer_at_the_other_end() {
+        let store = Store::open(":memory:", &[9; 32]).unwrap();
+        assert_eq!(
+            chat_audience(&store, "peer-b", "me"),
+            vec!["peer-b".to_owned()]
+        );
+        assert!(
+            chat_audience(&store, "me", "me").is_empty(),
+            "no device is sent a frame to itself"
+        );
+    }
+}
+
+#[cfg(test)]
+mod frame_thread_tests {
+    use super::{
+        announcement_payload, frame, message_payload, payload_thread, referenced_message,
+        thread_from_names, Announcement, MessageDeletePayload, MessageEditPayload, MessageRef,
+        PinUpdatePayload, ReactionPayload, Store,
+    };
+    use alver_core::payloads::{classify, Payload};
+    use alver_core::{Envelope, Hlc, Message, PROTOCOL_VERSION};
+    use serde_json::Value;
+    use uuid::Uuid;
+
+    /// A device id, which is what every fan-out row puts in `to` — and what must never reach a
+    /// listener that reads `messages-changed` as a chat.
+    const BALA: &str = "bala-device-id";
+    const DESIGN_TEAM: &str = "group-design";
+
+    fn addressed_to(to: &str, kind: &str, payload: Value) -> Envelope<Value> {
+        Envelope {
+            v: PROTOCOL_VERSION,
+            id: Uuid::now_v7(),
+            kind: kind.into(),
+            from: "me".into(),
+            to: to.into(),
+            hlc: Hlc {
+                physical_ms: 1,
+                logical: 0,
+            },
+            payload,
+        }
+    }
+
+    fn clock() -> Hlc {
+        Hlc {
+            physical_ms: 1,
+            logical: 0,
+        }
+    }
+
+    /// The bug this module exists for: a group post is delivered to one member, so `to` names
+    /// that member, while the thread it changed is the group. Flushing it while Bala's 1:1
+    /// thread was open used to clear *that* chat's unread and leave the group row still.
+    #[test]
+    fn a_group_post_flushing_to_a_member_names_the_group() {
+        let envelope = addressed_to(
+            BALA,
+            frame::MESSAGE,
+            message_payload("shipped tonight", None, DESIGN_TEAM, false),
+        );
+        assert_eq!(payload_thread(&envelope).as_deref(), Some(DESIGN_TEAM));
+        assert_ne!(
+            envelope.to, DESIGN_TEAM,
+            "the row must be addressed to a member, or this test proves nothing"
+        );
+    }
+
+    /// A direct thread is stored under the peer's id, so for the one case where `to` and the
+    /// thread agree, the payload says the same thing and the rewrite changes nothing.
+    #[test]
+    fn a_direct_post_names_the_thread_its_recipient_is() {
+        let envelope = addressed_to(
+            BALA,
+            frame::MESSAGE,
+            message_payload("see you there", None, BALA, false),
+        );
+        assert_eq!(payload_thread(&envelope).as_deref(), Some(BALA));
+    }
+
+    /// A pin names its chat at the top level and a reaction nests it, because the two structs
+    /// grew that way — the reader has to follow both, or one of the two frames silently names
+    /// nothing and falls back to the member.
+    #[test]
+    fn a_pin_and_a_reaction_name_their_chat() {
+        let id = Uuid::now_v7();
+        let pin = serde_json::to_value(PinUpdatePayload {
+            chat_id: DESIGN_TEAM.into(),
+            message_id: id,
+            pinned: true,
+            position: 2,
+        })
+        .expect("a pin encodes");
+        assert_eq!(
+            payload_thread(&addressed_to(BALA, frame::PIN_UPDATE, pin)).as_deref(),
+            Some(DESIGN_TEAM)
+        );
+
+        let reaction = serde_json::to_value(ReactionPayload {
+            message: MessageRef {
+                chat_id: DESIGN_TEAM.into(),
+                message_id: id,
+            },
+            emoji: "👍".into(),
+            remove: false,
+        })
+        .expect("a reaction encodes");
+        let envelope = addressed_to(BALA, frame::REACTION, reaction);
+        assert_eq!(
+            payload_thread(&envelope).as_deref(),
+            Some(DESIGN_TEAM),
+            "the chat nested under `message` is still the chat"
+        );
+        assert_eq!(referenced_message(&envelope), Some(id));
+    }
+
+    /// An announcement is addressed to a member and belongs to its group, and its frame is the
+    /// one the declared table used to describe with a key this app never sent. Both halves are
+    /// asserted from the production writer, because a round-trip fixture cannot see that drift.
+    #[test]
+    fn an_announcement_names_its_group_and_is_the_frame_the_table_parses() {
+        let announcement = Announcement {
+            id: Uuid::now_v7(),
+            group_id: DESIGN_TEAM.into(),
+            sender: "me".into(),
+            body: "freeze on monday".into(),
+            clock: clock(),
+            admins_only: true,
+            created_ms: 9,
+        };
+        let envelope = addressed_to(
+            BALA,
+            frame::ANNOUNCEMENT,
+            announcement_payload(&announcement),
+        );
+        assert_eq!(payload_thread(&envelope).as_deref(), Some(DESIGN_TEAM));
+        match classify(&envelope) {
+            Payload::Announcement(parsed) => {
+                assert_eq!(parsed.text, "freeze on monday");
+                assert_eq!(parsed.group_id, DESIGN_TEAM);
+                assert_eq!(parsed.announcement_id, announcement.id);
+            }
+            other => {
+                panic!("this build's own announcement frame must parse, got {other:?}")
+            }
+        }
+    }
+
+    /// An edit and a delete carry no chat at all, so `frame_thread` asks the store which thread
+    /// the message they name lives in. These two assertions pin what it hands the store lookup.
+    #[test]
+    fn an_edit_and_a_delete_are_resolved_through_the_message_they_name() {
+        let id = Uuid::now_v7();
+        let edit = serde_json::to_value(MessageEditPayload {
+            message_id: id,
+            body: "corrected".into(),
+            clock: clock(),
+        })
+        .expect("an edit encodes");
+        let envelope = addressed_to(BALA, frame::MESSAGE_EDIT, edit);
+        assert_eq!(payload_thread(&envelope), None);
+        assert_eq!(referenced_message(&envelope), Some(id));
+
+        let delete = serde_json::to_value(MessageDeletePayload {
+            message_id: id,
+            for_everyone: true,
+            reason: None,
+        })
+        .expect("a delete encodes");
+        let envelope = addressed_to(BALA, frame::MESSAGE_DELETE, delete);
+        assert_eq!(payload_thread(&envelope), None);
+        assert_eq!(referenced_message(&envelope), Some(id));
+    }
+
+    /// The precedence itself, so the step that turns "the store knows this message is in the
+    /// group" into an answer is a decision with a test rather than a line nobody checked.
+    #[test]
+    fn the_payload_wins_then_the_store_then_the_recipient() {
+        assert_eq!(
+            thread_from_names(Some(DESIGN_TEAM.into()), None, BALA),
+            DESIGN_TEAM
+        );
+        assert_eq!(
+            thread_from_names(None, Some(DESIGN_TEAM.into()), BALA),
+            DESIGN_TEAM
+        );
+        assert_eq!(thread_from_names(None, None, BALA), BALA);
+    }
+
+    /// An edit of a group message, resolved the way `frame_thread` resolves it: the frame names
+    /// no chat, so the answer comes out of the row this store actually holds.
+    #[test]
+    fn an_edit_of_a_group_message_is_answered_by_the_store() {
+        let mut store = Store::open(":memory:", &[7; 32]).expect("an in-memory store");
+        let message = Message {
+            id: Uuid::now_v7(),
+            chat_id: DESIGN_TEAM.into(),
+            sender: "me".into(),
+            body: "original".into(),
+            clock: clock(),
+            tombstone: false,
+            forwarded: false,
+        };
+        store.save_message(&message).expect("stored");
+        let edit = serde_json::to_value(MessageEditPayload {
+            message_id: message.id,
+            body: "corrected".into(),
+            clock: clock(),
+        })
+        .expect("an edit encodes");
+        let envelope = addressed_to(BALA, frame::MESSAGE_EDIT, edit);
+        let stored = referenced_message(&envelope)
+            .and_then(|id| store.get_message(id).ok().flatten())
+            .map(|row| row.chat_id);
+        assert_eq!(
+            thread_from_names(payload_thread(&envelope), stored, &envelope.to),
+            DESIGN_TEAM,
+            "a group edit flushing to one member must not name that member's thread"
+        );
+    }
+
+    /// The last resort inside `frame_thread` is `to`, and it is reached only when neither the
+    /// payload names a chat nor a message id is present for the store to resolve. A direct
+    /// row's recipient *is* its thread, so that answer is right for exactly the case that
+    /// needs it — and this is the shape that gets there: no keys at all.
+    #[test]
+    fn a_frame_that_names_nothing_leaves_the_recipient_as_the_only_answer() {
+        let envelope = addressed_to(
+            BALA,
+            frame::MESSAGE,
+            serde_json::json!({"text": "no chat here"}),
+        );
+        assert_eq!(payload_thread(&envelope), None);
+        assert_eq!(referenced_message(&envelope), None);
+    }
 }

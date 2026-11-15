@@ -1,5 +1,11 @@
 import { useEffect, type ReactNode } from 'react';
+import { ns, registerNamespace } from '../i18n';
+import systemCatalog from '../i18n/en/system';
 import { Icon, cx, type IconName } from './Icon';
+
+registerNamespace('system', systemCatalog);
+
+const text = ns('system');
 
 export type ToastTone = 'neutral' | 'accent' | 'success' | 'danger';
 
@@ -60,7 +66,7 @@ export function Toast({
         </button>
       ) : null}
       {onDismiss ? (
-        <button aria-label="Dismiss notification" className="ac-toast__close" onClick={onDismiss} type="button">
+        <button aria-label={text('toastDismiss', 'Dismiss notification')} className="ac-toast__close" onClick={onDismiss} type="button">
           <Icon name="x" size={14} />
         </button>
       ) : null}
@@ -82,7 +88,7 @@ export function ToastViewport({
 }) {
   return (
     <div
-      aria-label="Notifications"
+      aria-label={text('toastRegion', 'Notifications')}
       aria-live="polite"
       className={cx('ac-toast__viewport', className)}
       role="region"

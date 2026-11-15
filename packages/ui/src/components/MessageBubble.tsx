@@ -1,4 +1,6 @@
 import type { ReactNode } from 'react';
+import { ns, registerNamespace } from '../i18n';
+import chatCatalog from '../i18n/en/chat';
 import { Icon, cx, type IconName } from './Icon';
 import { ProgressBar } from './ProgressBar';
 import { Waveform } from './Waveform';
@@ -19,6 +21,12 @@ import {
   type ReactionInput,
 } from './logic';
 
+registerNamespace('chat', chatCatalog);
+
+// Not `text`: both MessageBubble and VoiceBody destructure a `text` prop, which would shadow
+// the helper and turn an ask into a call on a string.
+const say = ns('chat');
+
 export type MessageVariant = 'text' | 'file' | 'image' | 'video' | 'voice' | 'deleted';
 
 export type BubbleReply = { sender?: string; text?: string };
@@ -36,7 +44,11 @@ export type MessageBubbleProps = {
   time?: string;
   delivery?: DeliveryState;
   edited?: boolean;
+  /** Provenance chip: this row is a copy of something forwarded into the chat. */
   forwarded?: boolean;
+  /** Chip copy. Screens pass the localised strings; the gallery keeps the English defaults. */
+  forwardedLabel?: string;
+  editedLabel?: string;
   /** Quote block for a reply. */
   reply?: BubbleReply;
   /** Raw reactions; collapsed into one chip per emoji. */
@@ -109,6 +121,8 @@ export function MessageBubble(props: MessageBubbleProps) {
     delivery,
     edited = false,
     forwarded = false,
+    forwardedLabel = 'Forwarded',
+    editedLabel = '(edited)',
     reply,
     reactions,
     onReaction,
@@ -161,7 +175,7 @@ export function MessageBubble(props: MessageBubbleProps) {
     >
       {typeof selected === 'boolean' && onSelectedChange ? (
         <input
-          aria-label={time ? `Select message from ${time}` : 'Select message'}
+          aria-label={time ? say('selectMessageFrom', 'Select message from {{time}}', { time }) : say('selectMessageAria', 'Select message')}
           checked={selected}
           className="ac-bubble__check"
           onChange={(event) => onSelectedChange(event.target.checked)}
@@ -192,7 +206,7 @@ export function MessageBubble(props: MessageBubbleProps) {
 
         {forwarded ? (
           <span className="ac-bubble__forwarded">
-            <Icon name="forward" size={13} /> Forwarded
+            <Icon name="forward" size={13} /> {forwardedLabel}
           </span>
         ) : null}
 
@@ -206,7 +220,7 @@ export function MessageBubble(props: MessageBubbleProps) {
         {body}
 
         <span className="ac-bubble__meta">
-          {edited ? <span className="ac-bubble__edited">(edited)</span> : null}
+          {edited ? <span className="ac-bubble__edited">{editedLabel}</span> : null}
           {time ? <time>{time}</time> : null}
           {tick.icon ? (
             <span aria-label={tick.label} className="ac-bubble__ticks" role="img">
@@ -220,7 +234,11 @@ export function MessageBubble(props: MessageBubbleProps) {
           <span className="ac-bubble__reactions">
             {chips.map((chip) => (
               <button
-                aria-label={`${chip.count} reaction${chip.count === 1 ? '' : 's'}: ${reactionTooltip(chip.names)}`}
+                aria-label={
+                  chip.count === 1
+                    ? say('reactionChip', '{{count}} reaction: {{names}}', { count: chip.count, names: reactionTooltip(chip.names) })
+                    : say('reactionChipMany', '{{count}} reactions: {{names}}', { count: chip.count, names: reactionTooltip(chip.names) })
+                }
                 className="ac-bubble__reaction"
                 key={chip.emoji}
                 onClick={() => onReaction?.(chip.emoji)}
@@ -293,24 +311,24 @@ function FileBody(props: MessageBubbleProps) {
       </span>
       <span className="ac-bubble__file-actions">
         {transfer === 'sending' && onPause ? (
-          <MiniAction icon="pause" label="Pause transfer" onClick={onPause} />
+          <MiniAction icon="pause" label={say('pauseTransfer', 'Pause transfer')} onClick={onPause} />
         ) : null}
         {transfer === 'sending' && onCancel ? (
-          <MiniAction icon="x" label="Cancel transfer" onClick={onCancel} />
+          <MiniAction icon="x" label={say('cancelTransfer', 'Cancel transfer')} onClick={onCancel} />
         ) : null}
         {transfer === 'paused' && onResume ? (
-          <MiniAction icon="play" label="Resume transfer" onClick={onResume} />
+          <MiniAction icon="play" label={say('resumeTransfer', 'Resume transfer')} onClick={onResume} />
         ) : null}
         {transfer === 'failed' && onRetry ? (
           <button className="ac-btn ac-btn--sm ac-btn--secondary" onClick={onRetry} type="button">
-            Retry
+            {say('retry', 'Retry')}
           </button>
         ) : null}
         {transfer === 'complete' && onDownload ? (
-          <MiniAction icon="download" label={`Download ${fileName ?? 'file'}`} onClick={onDownload} />
+          <MiniAction icon="download" label={say('downloadFile', 'Download {{name}}', { name: fileName ?? 'file' })} onClick={onDownload} />
         ) : null}
         {!transfer && onDownload ? (
-          <MiniAction icon="download" label={`Download ${fileName ?? 'file'}`} onClick={onDownload} />
+          <MiniAction icon="download" label={say('downloadFile', 'Download {{name}}', { name: fileName ?? 'file' })} onClick={onDownload} />
         ) : null}
       </span>
     </>
@@ -335,11 +353,11 @@ function MiniAction({
 
 /** Play button + waveform + remaining duration. */
 function VoiceBody(props: MessageBubbleProps) {
-  const { voiceSeconds = 0, playedSeconds = 0, playing = false, onTogglePlay, onSeek, text } = props;
+  const { voiceSeconds = 0, playedSeconds = 0, playing = false, onTogglePlay, onSeek } = props;
   return (
     <span className="ac-bubble__voice">
       <button
-        aria-label={playing ? 'Pause voice note' : 'Play voice note'}
+        aria-label={playing ? say('pauseVoiceNote', 'Pause voice note') : say('playVoiceNote', 'Play voice note')}
         className="ac-bubble__voice-btn"
         onClick={onTogglePlay}
         type="button"
@@ -351,7 +369,7 @@ function VoiceBody(props: MessageBubbleProps) {
         onSeek={onSeek}
         positionSeconds={playedSeconds}
         playing={playing}
-        seed={props.waveformSeed ?? text ?? 'voice'}
+        seed={props.waveformSeed ?? props.text ?? 'voice'}
       />
       <span className="ac-bubble__duration">
         {formatDuration(playing ? voiceSeconds - playedSeconds : voiceSeconds)}
@@ -384,7 +402,7 @@ function MediaBody(props: MessageBubbleProps & { video: boolean }) {
     <span className="ac-bubble__grid">
       {shown.map((item, index) => (
         <button
-          aria-label={`Open image ${index + 1}`}
+          aria-label={say('openImageNumbered', 'Open image {{number}}', { number: index + 1 })}
           className="ac-bubble__grid-cell"
           key={`${item.src}-${index}`}
           onClick={onOpenMedia ? () => onOpenMedia(index) : undefined}
@@ -416,7 +434,7 @@ function MediaTile({
 }) {
   return (
     <button
-      aria-label={video ? 'Play video' : 'Open image'}
+      aria-label={video ? say('playVideo', 'Play video') : say('openImage', 'Open image')}
       className={cx('ac-bubble__media', video && 'ac-bubble__media--video')}
       onClick={onOpen}
       type="button"

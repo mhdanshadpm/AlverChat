@@ -9,6 +9,7 @@ import type {
   ConnectionReport,
   ExportResult,
   Group,
+  Identity,
   OverlaySnapshot,
   Peer,
   PinnedMessage,
@@ -44,7 +45,7 @@ export const tauriBridge: PlatformBridge = {
   deleteMessageLocal: (messageId) => invoke<boolean>('delete_message_local', { messageId }),
   deleteForEveryone: (messageId) => invoke<boolean>('delete_for_everyone', { messageId }),
   editMessageLocal: (messageId, text) => invoke<boolean>('edit_message_local', { messageId, text }),
-  getMyIdentity: () => invoke<{ peerId: string; fingerprint: string }>('get_my_identity'),
+  getMyIdentity: () => invoke<Identity>('get_my_identity'),
   getSettings: () => invoke<AppSettings>('get_settings'),
   updateSettings: (patch) => invoke<AppSettings>('update_settings', { patch }),
   setLaunchAtLogin: (enabled) => invoke<boolean>('set_launch_at_login', { enabled }),
@@ -93,4 +94,5 @@ export const tauriBridge: PlatformBridge = {
   leaveGroup: (id) => invoke<void>('leave_group', { id }),
   setAvatar: (avatarDataUrl) => invoke<string | null>('set_avatar', { avatarDataUrl }),
   getAvatar: () => invoke<string | null>('get_avatar'),
+  getPeerAvatar: (peerId) => invoke<string | null>('peer_avatar', { peerId }),
 };

@@ -9,16 +9,20 @@ import {
   Icon,
   IconButton,
   ListRow,
+  PeerAvatar,
   SearchInput,
   Tooltip,
   avatarPaletteFor,
   cx,
   initialsFor,
+  presenceForPeer,
+  statusLineFor,
   type AvatarPaletteColor,
   type ContextMenuEntry,
 } from '../components';
 import { ns, registerNamespace } from '../i18n';
 import chatCatalog from '../i18n/en/chat';
+import { peerTimeLabel } from './dock';
 import type { ToastTone } from './shared';
 import './chat.css';
 
@@ -44,11 +48,6 @@ export type ChatListProps = {
   className?: string;
 };
 
-function presenceFor(peer: Peer) {
-  if (!peer.online) return 'offline' as const;
-  return /meeting|busy|dnd|do not disturb/i.test(peer.status) ? ('busy' as const) : ('online' as const);
-}
-
 /** The desktop shell sends a palette name; anything else falls back to the hash. */
 function paletteFor(value: string | undefined, seed: string): AvatarPaletteColor {
   const named = value as AvatarPaletteColor | undefined;
@@ -58,7 +57,7 @@ function paletteFor(value: string | undefined, seed: string): AvatarPaletteColor
 function previewFor(peer: Peer): ReactNode {
   if (peer.typing) return <span className="ac-chat-typing">{text('typingNow', 'Typing…')}</span>;
   if (peer.preview) return peer.preview;
-  return <span className="ac-chat-preview-empty">{peer.status || text('tapToOpen', 'Open chat')}</span>;
+  return <span className="ac-chat-preview-empty">{statusLineFor(peer) || text('tapToOpen', 'Open chat')}</span>;
 }
 
 function clockOf(ms: number): string {
@@ -182,7 +181,9 @@ export function ChatList({
 
   const online = peers.filter(peer => peer.online).length;
   const status = peers.length
-    ? text('peersDiscoveredMany', '{{count}} peers found', { count: peers.length })
+    ? peers.length === 1
+      ? text('peersDiscovered', '{{count}} peer found', { count: peers.length })
+      : text('peersDiscoveredMany', '{{count}} peers found', { count: peers.length })
     : text('searchingLan', 'Searching the local network');
   const pinnedRows = visible.filter(isPinned);
   const plainRows = visible.filter(peer => !isPinned(peer));
@@ -198,7 +199,7 @@ export function ChatList({
       <header className="ac-chat-list__head">
         <div className="ac-chat-list__title">
           <div>
-            <span className="ac-chat-list__eyebrow">{text('workspace', 'Your workspace')}</span>
+            <span className="ac-chat-list__eyebrow">{text('workspace', 'YOUR WORKSPACE')}</span>
             <h1>{text('messages', 'Messages')}</h1>
           </div>
           <IconButton
@@ -262,6 +263,7 @@ export function ChatList({
                 {pinnedRows.map(peer => (
                   <ChatRow
                     active={active === peer.id}
+                    bridge={bridge}
                     key={peer.id}
                     muted={isMuted(peer)}
                     onContextMenu={point => setMenu({ peer, ...point })}
@@ -279,6 +281,7 @@ export function ChatList({
                 {plainRows.map(peer => (
                   <ChatRow
                     active={active === peer.id}
+                    bridge={bridge}
                     key={peer.id}
                     muted={isMuted(peer)}
                     onContextMenu={point => setMenu({ peer, ...point })}
@@ -295,7 +298,11 @@ export function ChatList({
           <>
             <div className="ac-chat-section">
               {text('inMessages', 'In messages')}{' '}
-              <span>{text('searchResultsMany', '{{count}} matches', { count: hits.length })}</span>
+              <span>
+                {hits.length === 1
+                  ? text('searchResults', '{{count}} match', { count: hits.length })
+                  : text('searchResultsMany', '{{count}} matches', { count: hits.length })}
+              </span>
             </div>
             {hits.slice(0, 20).map(hit => (
               <ListRow
@@ -378,12 +385,14 @@ export function ChatList({
 /** One chat row: avatar, name + preview, time + unread, pin and mute markers. */
 function ChatRow({
   peer,
+  bridge,
   active,
   muted,
   onSelect,
   onContextMenu,
 }: {
   peer: Peer;
+  bridge: PlatformBridge;
   active: boolean;
   muted: boolean;
   onSelect: (chatId: string) => void;
@@ -400,18 +409,20 @@ function ChatRow({
       }}
       type="button"
     >
-      <Avatar
+      <PeerAvatar
         color={paletteFor(peer.color, peer.name)}
         group={peer.group}
         initials={peer.initials || initialsFor(peer.name)}
         name={peer.name}
-        presence={presenceFor(peer)}
+        peerId={peer.group ? null : peer.id}
+        presence={presenceForPeer(peer)}
         size={40}
+        source={bridge}
       />
       <span className="ac-chat-row__body">
         <span className="ac-chat-row__top">
           <strong>{peer.name}</strong>
-          <time>{peer.time}</time>
+          <time>{peerTimeLabel(peer)}</time>
         </span>
         <span className="ac-chat-row__bottom">
           <span className="ac-chat-row__preview">{previewFor(peer)}</span>

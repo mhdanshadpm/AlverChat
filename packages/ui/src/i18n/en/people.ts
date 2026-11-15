@@ -1,7 +1,8 @@
 /* PeopleScreen catalog — every string the people list can show, keyed the way
    PeopleScreen.tsx asks for it. Flat keys only (i18next splits on '.'). */
 export default {
-  callsPhase6: 'Calls land in phase 6.',
+  /* People has no call engine of its own: it says so when the dial-out is absent. */
+  callsUnavailable: 'Calls are unavailable on this device.',
   cancel: 'Cancel',
   clearChatBody: 'This removes the messages and media shared with {{name}} from this device only.',
   clearChatConfirm: 'Clear chat',

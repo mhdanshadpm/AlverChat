@@ -14,6 +14,7 @@ import type {
   Peer,
   PlatformBridge,
 } from '../../../bridge/src';
+import { useAttachmentPreviews } from '../attachmentPreviews';
 import {
   AVATAR_PALETTE,
   Avatar,
@@ -80,8 +81,8 @@ const STATUS_VALUES = ['Available', 'Busy', 'In a meeting', 'Away'] as const;
 const CUSTOM_STATUS_MAX = 100;
 const DISPLAY_NAME_MAX = 40;
 
-/** Where each preview size is used, straight off the board. */
-const PREVIEW_CONTEXT = ['Chat, Profile', 'Contact List', 'Minimized'];
+/** Where each preview size is used, straight off the board. Exported for the key guard. */
+export const PREVIEW_CONTEXT = ['Chat, Profile', 'Contact List', 'Minimized'];
 
 const GLYPH_ICON: Record<FileGlyph, IconName> = {
   archive: 'archive',
@@ -160,8 +161,16 @@ export function formatFingerprint(value: string): string {
   return (clean.match(/.{1,4}/g) ?? []).slice(0, 6).join(' ');
 }
 
-/** One file message plus its transfer record, if the peer announced one. */
-export function mediaItemOf(message: ChatMessage, attachments: readonly Attachment[]): MediaItem {
+/**
+ * One file message plus its transfer record, if the peer announced one. The picture is
+ * whatever the shared preview cache holds for that row: `undefined` means nobody has
+ * asked yet, and only a finished image ever has bytes to draw.
+ */
+export function mediaItemOf(
+  message: ChatMessage,
+  attachments: readonly Attachment[],
+  preview?: (attachmentId: string) => string | null | undefined,
+): MediaItem {
   const name = message.fileName ?? message.text;
   const kind = fileKindFor(name);
   const match = attachments.find((attachment) => attachment.messageId === message.id) ?? null;
@@ -174,13 +183,19 @@ export function mediaItemOf(message: ChatMessage, attachments: readonly Attachme
     sender: message.sender,
     size: match?.bytes ?? null,
     time: message.time,
-    url: match?.previewUrl ?? null,
+    url: (match ? preview?.(match.id) : null) ?? null,
   };
 }
 
 /** Everything shared as a file, oldest message first, straight off the bridge. */
-export function filesOf(messages: readonly ChatMessage[], attachments: readonly Attachment[]): MediaItem[] {
-  return messages.filter((message) => message.kind === 'file').map((message) => mediaItemOf(message, attachments));
+export function filesOf(
+  messages: readonly ChatMessage[],
+  attachments: readonly Attachment[],
+  preview?: (attachmentId: string) => string | null | undefined,
+): MediaItem[] {
+  return messages
+    .filter((message) => message.kind === 'file')
+    .map((message) => mediaItemOf(message, attachments, preview));
 }
 
 function avatarColorFor(value: string, seed: string): AvatarPaletteColor {
@@ -238,7 +253,7 @@ export function MyProfileCard({
   return (
     <section className="prf-card prf-card--me">
       <header className="prf-card__head">
-        <h3 className="prf-card__title">{text('myProfile', 'My Profile')}</h3>
+        <h2 className="prf-card__title">{text('myProfile', 'My Profile')}</h2>
         <p className="prf-card__hint">{text('myProfileHint', 'This is the card every peer on your network sees.')}</p>
       </header>
 
@@ -268,7 +283,7 @@ export function MyProfileCard({
         )}
 
         <div className="prf-name-row">
-          <h4 className="prf-name">{shownName}</h4>
+          <h3 className="prf-name">{shownName}</h3>
           <IconButton
             label={text('editName', 'Change your display name')}
             name="pencil"
@@ -700,7 +715,7 @@ export function ContactProfile({
     <>
       <header className="prf-card__head prf-card__head--split">
         <div>
-          <h3 className="prf-card__title">{text('contactProfile', 'Contact Profile')}</h3>
+          <h2 className="prf-card__title">{text('contactProfile', 'Contact Profile')}</h2>
           <p className="prf-card__hint">{text('contactHint', 'Everything this peer announced on the local network.')}</p>
         </div>
         <IconButton
@@ -718,7 +733,7 @@ export function ContactProfile({
           presence={contact.online ? presenceFor(contact.status) : 'offline'}
           size="lg"
         />
-        <h4 className="prf-contact-name">{contact.name}</h4>
+        <h3 className="prf-contact-name">{contact.name}</h3>
         <p className="prf-contact-status">
           {contact.online ? (
             <>
@@ -749,12 +764,12 @@ export function ContactProfile({
         <Button icon="messageCircle" onClick={onMessage}>
           {text('message', 'Message')}
         </Button>
-        <Tooltip content={text('callsSoon', 'Voice and video calls ship in phase 6.')} wrap>
+        <Tooltip content={text('callTransport', 'Voice and video calls go over the same peer session as your messages.')} wrap>
           <Button icon="phone" onClick={() => onCall('voice')} variant="secondary">
             {text('voiceCall', 'Voice Call')}
           </Button>
         </Tooltip>
-        <Tooltip content={text('callsSoon', 'Voice and video calls ship in phase 6.')} wrap>
+        <Tooltip content={text('callTransport', 'Voice and video calls go over the same peer session as your messages.')} wrap>
           <Button icon="video" onClick={() => onCall('video')} variant="secondary">
             {text('videoCall', 'Video Call')}
           </Button>
@@ -1070,7 +1085,14 @@ export function ProfileScreen(props: ScreenProps) {
     };
   }, [bridge, contact, toast]);
 
-  const files = useMemo(() => filesOf(messages, attachments), [attachments, messages]);
+  // Only a finished picture has bytes to draw, so the rows ask for those and no others,
+  // and the list rebuilds itself when one arrives.
+  const pictures = useMemo(() => attachments.filter((entry) => entry.kind === 'image'), [attachments]);
+  const [previewOf, previewVersion] = useAttachmentPreviews(bridge, pictures);
+  const files = useMemo(
+    () => filesOf(messages, attachments, previewOf),
+    [attachments, messages, previewOf, previewVersion],
+  );
   const mediaItems = useMemo(() => files.filter((item) => item.isMedia), [files]);
   const docItems = useMemo(() => files.filter((item) => !item.isMedia), [files]);
 

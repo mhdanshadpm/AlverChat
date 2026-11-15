@@ -1,3 +1,5 @@
+import { ns, registerNamespace } from '../i18n';
+import chatCatalog from '../i18n/en/chat';
 import { placeContextMenu, type MenuPoint } from '../menu';
 import type { IconName } from './Icon';
 
@@ -97,7 +99,39 @@ export function compositeMembers(
     .map((entry) => entry.member);
 }
 
+/**
+ * Presence for a peer row. The token the peer declared on the wire decides it; matching
+ * our own liveness copy is only the fallback for a peer that shares nothing (an older
+ * build, or one that hides its status). Offline always wins: a dot must not promise a
+ * person who is not reachable.
+ */
+export function presenceForPeer(peer: {
+  online: boolean;
+  status?: string;
+  presence?: string;
+}): PresenceState {
+  if (!peer.online) return 'offline';
+  const declared = (peer.presence ?? '').trim().toLowerCase();
+  if (declared === 'online' || declared === 'away' || declared === 'busy') return declared;
+  const status = (peer.status ?? '').toLowerCase();
+  if (status.includes('meeting') || status.includes('busy') || status.includes('dnd') || status.includes('do not disturb'))
+    return 'busy';
+  if (status.includes('away')) return 'away';
+  return 'online';
+}
+
+/** The line under a name: what the peer typed about itself, else our liveness copy. */
+export function statusLineFor(peer: { status?: string; statusLine?: string }): string {
+  const declared = (peer.statusLine ?? '').trim();
+  if (declared.length > 0) return declared;
+  return peer.status ?? '';
+}
+
 /* ===== MessageBubble ===== */
+
+registerNamespace('chat', chatCatalog);
+
+const text = ns('chat');
 
 export type DeliveryState = 'sending' | 'delivered' | 'read';
 export type FileTransferState = 'sending' | 'paused' | 'failed' | 'complete';
@@ -120,12 +154,12 @@ export function deliveryTicks(delivery: DeliveryState | undefined, mine: boolean
   if (!mine) return { icon: null, label: '', count: 0 };
   switch (delivery) {
     case 'read':
-      return { icon: 'checkCheck', label: 'Read', count: 2 };
+      return { icon: 'checkCheck', label: text('deliveryRead', 'Read'), count: 2 };
     case 'delivered':
-      return { icon: 'check', label: 'Delivered', count: 1 };
+      return { icon: 'check', label: text('deliveryDelivered', 'Delivered'), count: 1 };
     case 'sending':
     default:
-      return { icon: 'loader', label: 'Sending', count: 0 };
+      return { icon: 'loader', label: text('deliverySending', 'Sending'), count: 0 };
   }
 }
 
@@ -137,16 +171,16 @@ export function fileTransferLabel(
 ): string {
   switch (state) {
     case 'paused':
-      return 'Paused';
+      return text('filePaused', 'Paused');
     case 'failed':
-      return 'Failed';
+      return text('fileFailed', 'Failed');
     case 'complete':
-      return 'Complete';
+      return text('fileComplete', 'Complete');
     default: {
       if (totalBytes && typeof transferredBytes === 'number') {
-        return `Sending… ${transferPercent(transferredBytes, totalBytes)}%`;
+        return text('fileSendingPercent', 'Sending… {{percent}}%', { percent: transferPercent(transferredBytes, totalBytes) });
       }
-      return 'Sending…';
+      return text('fileSending', 'Sending\u2026');
     }
   }
 }
@@ -231,6 +265,19 @@ export function formatDuration(totalSeconds: number): string {
   const rest = seconds % 60;
   const pad = (value: number) => String(value).padStart(2, '0');
   return hours > 0 ? `${pad(hours)}:${pad(minutes)}:${pad(rest)}` : `${pad(minutes)}:${pad(rest)}`;
+}
+
+/**
+ * Whether a message is still inside the edit window the Settings screen stores.
+ *
+ * The boundary is inclusive, and `0` minutes means a message can only be rewritten in the
+ * millisecond it was written — which is the same reading `edit_window` gives it on the Rust
+ * side, where the write is actually refused. An unreadable stamp counts as inside, so a
+ * message never becomes uneditable because of a timestamp this device could not parse.
+ */
+export function withinEditWindow(sentMs: number, nowMs: number, minutes: number): boolean {
+  if (Number.isNaN(sentMs)) return true;
+  return nowMs - sentMs <= Math.max(0, minutes) * 60_000;
 }
 
 export type ReactionInput = { emoji: string; by: string };

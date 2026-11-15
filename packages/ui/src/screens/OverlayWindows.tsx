@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { ContactRound, Maximize2, MessageCircle, Phone, Reply, Send, UsersRound, X } from 'lucide-react';
+import { Check, ContactRound, Maximize2, Megaphone, MessageCircle, Minus, Phone, Reply, Send, UsersRound, X } from 'lucide-react';
 import {
+  APP_NAME,
   bridgeForRuntime,
   emptyBrowserBridge,
   type Group,
@@ -11,10 +12,17 @@ import {
   type PlatformBridge,
 } from '../../../bridge/src';
 import { ToastViewport, type ToastView } from '../components';
-import { groupPeer, summaryOf, type GroupThread } from '../groupChats';
+import { ns, registerNamespace } from '../i18n';
+import shellCatalog from '../i18n/en/shell';
+import { groupPeer, rosterRows, summaryOf, type GroupThread } from '../groupChats';
 import { CallOverlay } from '../calls/CallOverlay';
 import { useCall } from '../calls/useCall';
 import { needsOnboarding, useAppBridge, type ScreenProps, type ToastTone, type View } from './shared';
+import { callClockLabel, dockIconMood, dockOpacity, dockTooltip, idlePhotoFor, morphRevertMs, oldestFirst, peerTimeLabel, showMorphedIcon } from './dock';
+import { dockPriority, shouldShowBubble, visibleBubbles } from '../state';
+
+registerNamespace('shell', shellCatalog);
+const text = ns('shell');
 import { ChatList } from './ChatList';
 import { Conversation } from './Conversation';
 import { GroupsScreen } from './GroupsScreen';
@@ -25,9 +33,31 @@ function Avatar({ peer }: { peer: Peer }) {
   return <span className={`avatar ${peer.color} ${peer.group ? 'group' : ''}`}>{peer.group ? <UsersRound size={17}/> : peer.initials}<i className={peer.online ? 'online' : ''}/></span>;
 }
 
+/** Two short tones. Windows raises no toast for a message (the bubble is the alert), and a
+    bubble has no sound of its own, so this keeps the "notification sound" switch honest. */
+function chime(): void {
+  const AudioCtor = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!AudioCtor) return;
+  const context = new AudioCtor();
+  [880, 1174.66].forEach((frequency, index) => {
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    const at = context.currentTime + index * 0.22;
+    oscillator.frequency.value = frequency;
+    oscillator.type = 'sine';
+    gain.gain.setValueAtTime(0, at);
+    gain.gain.linearRampToValueAtTime(0.1, at + 0.02);
+    gain.gain.linearRampToValueAtTime(0, at + 0.2);
+    oscillator.connect(gain).connect(context.destination);
+    oscillator.start(at);
+    oscillator.stop(at + 0.22);
+  });
+  window.setTimeout(() => void context.close(), 900);
+}
+
 function useOverlayState() {
   const [bridge, setBridge] = useState<PlatformBridge>(emptyBrowserBridge);
-  const [state, setState] = useState<OverlaySnapshot>({ peers: [], unreadTotal: 0, open: false, dockSide: 'right', snapToEdge: true, bubblesEnabled: true, bubbleAutoHideSeconds: 8 });
+  const [state, setState] = useState<OverlaySnapshot>({ peers: [], unreadTotal: 0, open: false, dockSide: 'right', snapToEdge: true, bubblesEnabled: true, bubbleAutoHideSeconds: 8, showMessagePreview: true, opacityPercent: 90, idleIcon: 'logo', iconMorphEnabled: true, iconMorphDelaySeconds: 5, notificationsQuiet: false, liveCall: null, announcements: [] });
   useEffect(() => { let unlisten: (() => void) | undefined; let mounted = true;
     void bridgeForRuntime().then(async next => { if (!mounted) return; setBridge(next); setState(await next.overlaySnapshot());
       unlisten = await listen<OverlaySnapshot>('overlay-state', event => setState(event.payload));
@@ -87,29 +117,91 @@ export function DockWindow() {
   const { bridge, state } = useOverlayState();
   const [draft, setDraft] = useState(''); const [replyId, setReplyId] = useState<string | null>(null);
   const [bubblesExpired, setBubblesExpired] = useState(false);
-  const bubblesEnabled = state.bubblesEnabled;
+  const [iconReverted, setIconReverted] = useState(false);
+  /* Bubbles are a visual alert, so the quiet rule that stops the chime stops them too. */
+  const bubblesEnabled = state.bubblesEnabled && shouldShowBubble(state.open, state.notificationsQuiet);
   const bubbleHideDelay = state.bubbleAutoHideSeconds;
-  const unread = state.peers.filter(peer => peer.unread).slice(0, 3);
-  const notificationKey = unread.map(peer => `${peer.id}:${peer.preview}:${peer.time}`).join('|');
+  const unread = oldestFirst(state.peers.filter(peer => peer.unread));
+  const visibleUnread = bubblesExpired ? [] : visibleBubbles(unread, 3);
+  const notificationKey = visibleUnread.map(peer => `${peer.id}:${peer.preview}:${peerTimeLabel(peer)}`).join('|');
   useEffect(() => {
     setBubblesExpired(false);
     if (!notificationKey || !bubblesEnabled) return;
     const timer = window.setTimeout(() => setBubblesExpired(true), bubbleHideDelay * 1000);
     return () => window.clearTimeout(timer);
   }, [notificationKey, bubblesEnabled, bubbleHideDelay]);
-  const visibleUnread = bubblesExpired || !bubblesEnabled ? [] : unread;
-  useEffect(() => { void bridge.resizeDock(visibleUnread.length > 0); }, [bridge, visibleUnread.length]);
+  /* Settings → Revert delay: the sender's face is a temporary guest on the icon, and a
+     fresh unread starts the clock again. The call face is not on this timer. */
+  useEffect(() => {
+    setIconReverted(false);
+    if (!notificationKey || !state.iconMorphEnabled) return;
+    const timer = window.setTimeout(() => setIconReverted(true), morphRevertMs(state.iconMorphDelaySeconds));
+    return () => window.clearTimeout(timer);
+  }, [notificationKey, state.iconMorphEnabled, state.iconMorphDelaySeconds]);
+  /* An unacknowledged announcement stays on the icon until it is acknowledged:
+     it is a network notice, not a chat preview, so the bubble timer does not hide it. */
+  const announcement = state.announcements[0] ?? null;
+  const [acking, setAcking] = useState(false);
+  const acknowledge = (id: string) => {
+    setAcking(true);
+    void bridge.acknowledgeAnnouncement(id).catch(() => undefined).finally(() => setAcking(false));
+  };
+  const bubbles = bubblesEnabled ? visibleUnread : [];
+  useEffect(() => { void bridge.resizeDock(bubbles.length > 0 || Boolean(announcement)); }, [bridge, bubbles.length, announcement]);
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen<boolean>('message-alert', event => { if (event.payload) chime(); }).then(next => { unlisten = next; });
+    return () => unlisten?.();
+  }, []);
   const drag=useNativeDrag(bridge,()=>void bridge.toggleCompact());
-  const iconPeer = unread[0] ?? state.peers[0];
+  const liveCall = state.liveCall;
+  const priority = dockPriority(liveCall !== null, state.unreadTotal);
+  const iconPeer = priority === 'call'
+    ? state.peers.find(peer => peer.id === liveCall?.chatId)
+    : priority === 'unread' ? unread[unread.length - 1] : undefined;
+  /* "Icon morph (on activity)" is the only thing that lets a chat borrow the icon's face. */
+  const activeFace = showMorphedIcon(state.iconMorphEnabled, iconReverted, liveCall !== null) ? iconPeer : undefined;
+  /* The call timer only runs while a call is connected, so an idle dock never repaints. */
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!liveCall?.ongoing) return;
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [liveCall?.ongoing]);
+  /* "Idle icon: My Profile Photo" can only be answered by the engine, which owns the
+     local avatar; nothing has been fetched until the choice is actually made. */
+  const [selfPhoto, setSelfPhoto] = useState<string | null>(null);
+  useEffect(() => {
+    if (state.idleIcon !== 'photo') return;
+    let mounted = true;
+    void bridge.getAvatar().then(next => { if (mounted) setSelfPhoto(next); }).catch(() => undefined);
+    return () => { mounted = false; };
+  }, [bridge, state.idleIcon]);
+  const idlePhoto = idlePhotoFor(state.idleIcon, priority === 'unread' && activeFace ? state.unreadTotal : 0, selfPhoto);
+  const mood = dockIconMood(liveCall !== null, state.notificationsQuiet);
+  const tooltip = dockTooltip({
+    inCall: liveCall !== null,
+    peerName: liveCall?.peerName || iconPeer?.name || '',
+    unreadTotal: state.unreadTotal,
+    quiet: state.notificationsQuiet,
+  });
   const onPointer = (event: ReactPointerEvent) => { if(!drag.dragging) void bridge.setOverlayHitRegions(Boolean((event.target as HTMLElement).closest('.overlay-hit'))); };
   return <div className={`overlay-canvas dock-canvas dock-side-${state.dockSide}`} onPointerMove={onPointer} onPointerLeave={() => { if(!drag.dragging) void bridge.setOverlayHitRegions(false); }}>
-    <div className="dock-stack">
-      <div className={`dock-bubbles overlay-hit ${visibleUnread.length ? 'has-bubbles' : ''}`}>{visibleUnread.map(peer => <article className="dock-bubble" key={peer.id}>
-        <button className="bubble-open" onClick={() => void bridge.openFullApp(peer.id)}><Avatar peer={peer}/><span className="dock-bubble-copy"><b>{peer.name}</b><small>{peer.preview}</small></span><time>{peer.time}</time></button>
-        <button className="bubble-reply" aria-label={`Quick reply to ${peer.name}`} onClick={() => setReplyId(replyId === peer.id ? null : peer.id)}><Reply size={14}/></button>
-        {replyId === peer.id && <form className="quick-reply" onSubmit={event => { event.preventDefault(); if (draft.trim() && peer.online) void bridge.sendMessage(peer.id, draft.trim()).then(() => { setDraft(''); setReplyId(null); }).catch(() => {}); }}><input autoFocus disabled={!peer.online} value={draft} onChange={event => setDraft(event.target.value)} placeholder={peer.online?'Reply...':'Peer unavailable on the local network'}/><button disabled={!peer.online}><Send size={14}/></button></form>}
+    <div className="dock-stack" style={{ opacity: dockOpacity(state.opacityPercent) }}>
+      <div className={`dock-bubbles overlay-hit ${bubbles.length || announcement ? 'has-bubbles' : ''}`}>
+        {announcement ? <article className="dock-bubble announcement">
+          <button className="bubble-open" onClick={() => void bridge.openFullApp(announcement.groupId)}>
+            <span className="announcement-badge"><Megaphone size={15}/></span>
+            <span className="dock-bubble-copy"><b>{announcement.groupName}</b><small>{announcement.text}</small><em>{announcement.authorName}{state.announcements.length > 1 ? <> · {text('announcementMore', '+{{count}} more', { count: state.announcements.length - 1 })}</> : ''}</em></span>
+          </button>
+          <button className="bubble-reply announcement-ack" aria-label={text('dockAcknowledge', 'Acknowledge announcement')} disabled={acking} onClick={() => acknowledge(announcement.id)}><Check size={14}/></button>
+        </article> : null}
+        {bubbles.map(peer => <article className="dock-bubble" key={peer.id}>
+        <button className="bubble-open" onClick={() => void bridge.openFullApp(peer.id)}><Avatar peer={peer}/><span className="dock-bubble-copy"><b>{peer.name}</b><small>{state.showMessagePreview ? peer.preview : text('dockNewMessage', 'New message')}</small></span><time>{peerTimeLabel(peer)}</time></button>
+        <button className="bubble-reply" aria-label={text('dockQuickReplyTo', 'Quick reply to {{name}}', { name: peer.name })} onClick={() => setReplyId(replyId === peer.id ? null : peer.id)}><Reply size={14}/></button>
+        {replyId === peer.id && <form className="quick-reply" onSubmit={event => { event.preventDefault(); if (draft.trim() && peer.online) void bridge.sendMessage(peer.id, draft.trim()).then(() => { setDraft(''); setReplyId(null); }).catch(() => {}); }}><input autoFocus disabled={!peer.online} value={draft} onChange={event => setDraft(event.target.value)} placeholder={peer.online ? text('dockReplyHint', 'Reply...') : text('dockPeerUnavailable', 'Peer unavailable on the local network')}/><button disabled={!peer.online}><Send size={14}/></button></form>}
       </article>)}</div>
-      <button {...drag.handlers} className={`floating-dock dock-trigger overlay-hit ${state.unreadTotal ? 'has-unread' : ''} ${drag.dragging?'is-dragging':''}`} onContextMenu={event => { event.preventDefault(); void bridge.openDockMenu(); }} aria-label="Open AlverChat quick chats">{iconPeer && state.unreadTotal ? <Avatar peer={iconPeer}/> : <MessageCircle size={23} fill="currentColor"/>}{state.unreadTotal > 0 && <span>{state.unreadTotal}</span>}</button>
+      <button {...drag.handlers} title={tooltip} className={`floating-dock dock-trigger overlay-hit dock-mood-${mood} ${state.unreadTotal ? 'has-unread' : ''} ${drag.dragging?'is-dragging':''}`} onContextMenu={event => { event.preventDefault(); void bridge.openDockMenu(); }} aria-label={text('dockOpenQuickChats', 'Open AlverChat quick chats')}>{activeFace ? <Avatar peer={activeFace}/> : idlePhoto ? <img alt="" className="dock-idle-photo" src={idlePhoto}/> : <MessageCircle size={23} fill="currentColor"/>}{state.unreadTotal > 0 && !liveCall && <span className="dock-badge">{state.unreadTotal}</span>}{liveCall ? <span className={`dock-state-chip ${mood}`}><Phone size={10}/>{liveCall.ongoing ? callClockLabel(liveCall.startedMs, nowMs) : null}</span> : null}{state.notificationsQuiet && !liveCall ? <span className="dock-state-chip dnd" aria-hidden="true"><Minus size={11}/></span> : null}</button>
     </div>
   </div>;
 }
@@ -285,8 +377,13 @@ export function CompactWindow() {
 
   const mergedPeers = useMemo(() => {
     /* Overlay peers win: the desktop shell may already list a group chat. */
-    const known = new Set(peers.map(peer => peer.id));
-    return [...peers, ...groups.filter(group => !known.has(group.id)).map(group => groupPeer(group, threads[group.id]))];
+    const byId = new Map(peers.map(peer => [peer.id, peer]));
+    return [
+      ...peers,
+      ...groups
+        .filter(group => !byId.has(group.id))
+        .map(group => groupPeer(group, threads[group.id], rosterRows(group, byId))),
+    ];
   }, [peers, groups, threads]);
 
   const nameOf = useCallback(
@@ -351,12 +448,12 @@ export function CompactWindow() {
             <div className="brandmark mini-brand">
               <MessageCircle size={18} />
             </div>
-            <b>AlverChat</b>
+            <b>{APP_NAME}</b>
             <span className="compact-head-actions no-drag">
-              <button aria-label="Expand to full app" className="iconbtn" onClick={() => void bridge.openFullApp()}>
+              <button aria-label={text('compactExpand', 'Expand to full app')} className="iconbtn" onClick={() => void bridge.openFullApp()}>
                 <Maximize2 size={15} />
               </button>
-              <button aria-label="Close quick chats" className="iconbtn" onClick={() => void bridge.hideCompact()}>
+              <button aria-label={text('compactClose', 'Close quick chats')} className="iconbtn" onClick={() => void bridge.hideCompact()}>
                 <X size={17} />
               </button>
             </span>
@@ -364,7 +461,7 @@ export function CompactWindow() {
         ) : null}
 
         {!chatOpen ? (
-          <nav aria-label="Quick chat sections" className="compact-tabs no-drag">
+          <nav aria-label={text('compactSections', 'Quick chat sections')} className="compact-tabs no-drag">
             {COMPACT_TABS.map(item => (
               <button
                 aria-current={tab === item.id ? 'page' : undefined}
@@ -387,10 +484,10 @@ export function CompactWindow() {
               <div className="brandmark">
                 <MessageCircle size={22} />
               </div>
-              <b>Set up AlverChat to start chatting</b>
-              <p>Pick your display name and finish setup in the full app — the quick window picks it up automatically.</p>
+              <b>{text('compactSetupTitle', 'Set up AlverChat to start chatting')}</b>
+              <p>{text('compactSetupBody', 'Pick your display name and finish setup in the full app — the quick window picks it up automatically.')}</p>
               <button className="primary" onClick={() => void bridge.openFullApp()} type="button">
-                Open AlverChat
+                {text('openAppAction', 'Open AlverChat')}
               </button>
             </div>
           ) : tab === 'chats' ? (
@@ -451,4 +548,4 @@ export function CompactWindow() {
   );
 }
 
-export function MenuWindow() { const { bridge } = useOverlayState(); return <div className="overlay-canvas menu-canvas" onPointerMove={event => void bridge.setOverlayHitRegions(Boolean((event.target as HTMLElement).closest('.overlay-hit')))} onPointerLeave={() => void bridge.setOverlayHitRegions(false)}><section className="overlay-menu overlay-hit"><button onClick={() => { void bridge.hideMenu(); void bridge.toggleCompact(); }}>Open Quick chats</button><button onClick={() => void bridge.openFullApp()}>Open AlverChat</button><button onClick={() => void bridge.resetOverlayPosition()}>Reset icon position</button><button onClick={() => void bridge.quit()}>Quit</button></section></div>; }
+export function MenuWindow() { const { bridge } = useOverlayState(); return <div className="overlay-canvas menu-canvas" onPointerMove={event => void bridge.setOverlayHitRegions(Boolean((event.target as HTMLElement).closest('.overlay-hit')))} onPointerLeave={() => void bridge.setOverlayHitRegions(false)}><section className="overlay-menu overlay-hit"><button onClick={() => { void bridge.hideMenu(); void bridge.toggleCompact(); }}>{text('menuOpenQuickChats', 'Open Quick chats')}</button><button onClick={() => void bridge.openFullApp()}>{text('openAppAction', 'Open AlverChat')}</button><button onClick={() => void bridge.resetOverlayPosition()}>{text('menuResetPosition', 'Reset icon position')}</button><button onClick={() => void bridge.quit()}>{text('menuQuit', 'Quit')}</button></section></div>; }

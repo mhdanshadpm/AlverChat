@@ -23,8 +23,9 @@ import {
 
 describe('floating dock behavior',()=>{
   it('keeps only the three newest message bubbles',()=>{expect(visibleBubbles([1,2,3,4].map(id=>({id:String(id),sender:'peer',text:'hi',sentAt:id}))).map(b=>b.id)).toEqual(['2','3','4'])});
+  it('keeps the newest of any list, not only bubbles',()=>{expect(visibleBubbles(['a','b','c','d','e'],3)).toEqual(['c','d','e']);expect(visibleBubbles(['a'],3)).toEqual(['a'])});
   it('prioritizes a call over unread and idle states',()=>{expect(dockPriority(true,3)).toBe('call');expect(dockPriority(false,2)).toBe('unread');expect(dockPriority(false,0)).toBe('idle')});
-  it('suppresses bubbles for open, muted, and DND conversations',()=>{expect(shouldShowBubble(false,false,false)).toBe(true);expect(shouldShowBubble(true,false,false)).toBe(false);expect(shouldShowBubble(false,true,false)).toBe(false);expect(shouldShowBubble(false,false,true)).toBe(false)});
+  it('suppresses bubbles for an open drawer and a quiet device',()=>{expect(shouldShowBubble(false,false)).toBe(true);expect(shouldShowBubble(true,false)).toBe(false);expect(shouldShowBubble(false,true)).toBe(false);expect(shouldShowBubble(true,true)).toBe(false)});
 });
 
 /* ===== photoPipeline (pure parts only — no DOM, no canvas) ===== */

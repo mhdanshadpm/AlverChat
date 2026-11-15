@@ -1,27 +1,33 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { AppSettings, Attachment, ChatMessage, Group, Peer, PlatformBridge, PinnedMessage } from '../../../bridge/src';
+import type { AppSettings, Attachment, ChatMessage, Group, Identity, Peer, PlatformBridge, PinnedMessage } from '../../../bridge/src';
 import {
-  Avatar,
   Badge,
   Button,
   EmptyState,
   Icon,
   IconButton,
   ListRow,
+  PeerAvatar,
   Segmented,
   Toggle,
   Tooltip,
   cx,
   formatFileSize,
   initialsFor,
+  presenceForPeer,
+  statusLineFor,
 } from '../components';
 import { ns, registerNamespace } from '../i18n';
 import chatCatalog from '../i18n/en/chat';
-import { messageTime, type ToastTone } from './shared';
+import { useAttachmentPreviews } from '../attachmentPreviews';
+import { authorName, messageTime, type ToastTone } from './shared';
 import './chat.css';
 
 registerNamespace('chat', chatCatalog);
 const text = ns('chat');
+
+/** A stable "nothing to draw", so a closed tab cannot re-run the preview effect. */
+const NO_ATTACHMENTS: readonly Attachment[] = [];
 
 type DetailsTab = 'media' | 'files' | 'links' | 'starred' | 'pinned' | 'members';
 
@@ -33,7 +39,7 @@ export type ChatDetailsProps = {
   chatId: string;
   peers: Peer[];
   settings: AppSettings;
-  identity: { peerId: string; fingerprint: string } | null;
+  identity: Identity | null;
   onClose: () => void;
   onOpenChat: (chatId: string) => void;
   onPatchSettings: (patch: Partial<AppSettings>) => void;
@@ -81,8 +87,22 @@ export function ChatDetails({
     void reload();
   }, [reload]);
 
-  const media = useMemo(() => attachments.filter(entry => entry.previewUrl && entry.kind !== 'file' && entry.kind !== 'audio'), [attachments]);
-  const files = useMemo(() => attachments.filter(entry => entry.kind === 'file' || !entry.previewUrl), [attachments]);
+  /** The panel keeps people as ids in its lists; nobody should read one as a name. */
+  const nameOf = useCallback(
+    (id: string) =>
+      authorName(id, peers, {
+        id: identity?.peerId ?? 'me',
+        name: settings.displayName.trim() || text('groupYou', 'You'),
+      }),
+    [identity?.peerId, peers, settings.displayName],
+  );
+
+  // A tile is a picture, so the Media tab holds the attachments this build can draw one
+  // for; a video, a recording and a document all belong in Files with their size.
+  const media = useMemo(() => attachments.filter(entry => entry.kind === 'image'), [attachments]);
+  const files = useMemo(() => attachments.filter(entry => entry.kind !== 'image'), [attachments]);
+  // Only the tab that is open pays for bytes, and only once per attachment.
+  const [previewOf] = useAttachmentPreviews(bridge, tab === 'media' ? media : NO_ATTACHMENTS);
   const links = useMemo(() => {
     const found = new Set<string>();
     for (const message of messages) for (const hit of message.text.match(LINK) ?? []) found.add(hit);
@@ -94,13 +114,13 @@ export function ChatDetails({
     if (!group) return [];
     return group.members.map((id, index) => ({
       id,
-      name: peers.find(entry => entry.id === id)?.name ?? (id === 'me' || id === group.admin ? text('groupYou', 'You') : id),
+      name: nameOf(id),
       admin: id === group.admin,
       color: (peers.find(entry => entry.id === id)?.color ?? undefined) as string | undefined,
       online: id === 'me' ? true : (peers.find(entry => entry.id === id)?.online ?? index % 2 === 0),
       self: id === 'me' || id === identity?.peerId,
     }));
-  }, [group, peers, identity]);
+  }, [group, nameOf, peers, identity]);
 
   const tabs = [
     { value: 'media', label: text('mediaTab', 'Media') },
@@ -123,16 +143,18 @@ export function ChatDetails({
       </div>
 
       <div className="ac-details__identity">
-        <Avatar
+        <PeerAvatar
           group={isGroup}
           initials={peer?.initials || initialsFor(peer?.name ?? chatId)}
           name={peer?.name ?? chatId}
-          presence={peer?.online ? 'online' : 'offline'}
+          peerId={isGroup ? null : peer?.id}
+          presence={peer ? presenceForPeer(peer) : 'offline'}
           size={56}
+          source={bridge}
         />
         <div>
           <h2>{peer?.name ?? chatId}</h2>
-          <p>{peer?.status || text('encryptionOn', 'End-to-end encrypted on this local network')}</p>
+          <p>{(peer && statusLineFor(peer)) || text('encryptionOn', 'End-to-end encrypted on this local network')}</p>
         </div>
         {group?.description ? <p>{group.description}</p> : null}
       </div>
@@ -174,6 +196,7 @@ export function ChatDetails({
         label={text('detailsTitle', 'Chat details')}
         onChange={value => setTab(value as DetailsTab)}
         options={tabs.map(entry => ({ label: entry.label, value: entry.value }))}
+        scroll
         value={tab}
       />
 
@@ -191,7 +214,11 @@ export function ChatDetails({
                   onClick={() => void bridge.openAttachment(entry.id).catch(() => undefined)}
                   type="button"
                 >
-                  <img alt={entry.name} src={entry.previewUrl ?? ''} />
+                  {previewOf(entry.id) ? (
+                    <img alt={entry.name} src={previewOf(entry.id) ?? ''} />
+                  ) : (
+                    <Icon name="image" size={20} />
+                  )}
                 </button>
               ))}
             </div>
@@ -255,7 +282,7 @@ export function ChatDetails({
                 hint={entry.text}
                 icon="star"
                 key={entry.id}
-                title={entry.sender}
+                title={nameOf(entry.sender)}
                 trailing={<time>{messageTime(entry)}</time>}
               />
             ))}
@@ -274,7 +301,7 @@ export function ChatDetails({
                 hint={entry.text}
                 icon="pin"
                 key={entry.messageId}
-                title={entry.sender}
+                title={nameOf(entry.sender)}
                 trailing={
                   <IconButton
                     iconSize={15}
@@ -298,7 +325,15 @@ export function ChatDetails({
             <ListRow
               icon={member.online ? 'circle' : 'dot'}
               key={member.id}
-              leading={<Avatar initials={initialsFor(member.name)} name={member.name} size={24} />}
+              leading={
+                <PeerAvatar
+                  initials={initialsFor(member.name)}
+                  name={member.name}
+                  peerId={member.self ? null : member.id}
+                  size={24}
+                  source={bridge}
+                />
+              }
               onClick={member.self ? undefined : () => onOpenChat(member.id)}
               title={member.name}
               trailing={

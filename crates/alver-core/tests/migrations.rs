@@ -36,6 +36,7 @@ fn message(id: Uuid, chat_id: &str, sender: &str, body: &str, at: u64) -> Messag
             logical: 0,
         },
         tombstone: false,
+        forwarded: false,
     }
 }
 
@@ -203,7 +204,7 @@ fn a_populated_v1_database_upgrades_with_every_row_intact() {
     assert!(store
         .record_receipt(seed.first, "peer-c", ReceiptKind::Read, 410)
         .unwrap());
-    assert!(store.pin(seed.first, 0, 420).unwrap());
+    assert!(store.pin(seed.first, 0, 420, "peer-c").unwrap());
     assert!(store.star(seed.second, 430).unwrap());
     store
         .set_setting(setting::EDIT_WINDOW_MS, &900_u64, 440)
@@ -257,7 +258,7 @@ fn a_populated_v1_database_upgrades_with_every_row_intact() {
         .unwrap();
     assert_eq!(store.calls_for_chat("chat-1").unwrap().len(), 1);
 
-    // The v1 columns all survive; v5 only appends the reply pointer.
+    // The v1 columns all survive; v5 appends the reply pointer and v6 the copy flag.
     let columns = store.table_columns("messages").unwrap();
     assert_eq!(
         columns,
@@ -269,7 +270,8 @@ fn a_populated_v1_database_upgrades_with_every_row_intact() {
             "physical_ms",
             "logical",
             "tombstone",
-            "reply_to"
+            "reply_to",
+            "forwarded"
         ]
     );
     assert!(store.reply_to_for(seed.second).unwrap().is_none());
@@ -316,6 +318,41 @@ fn a_v4_database_gains_the_reply_column_and_keeps_its_rows() {
     assert!(store.reply_to_for(second).unwrap().is_none());
     assert!(store.replies_for_chat("chat-5").unwrap().is_empty());
     assert!(!store.set_reply_to(Uuid::now_v7(), Some(first)).unwrap());
+    drop(store);
+    fs::remove_file(&path).ok();
+}
+
+#[test]
+fn a_v6_database_gains_the_pin_author_and_keeps_its_rows() {
+    let path = database_path("pin-author");
+    let kept = Uuid::now_v7();
+    {
+        let mut store = Store::open_to_version(path.to_str().unwrap(), &key(), 6).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 6);
+        store
+            .save_message(&message(kept, "chat-6", "peer-a", "keep this up", 100))
+            .unwrap();
+        // The column does not exist yet, so no pin can record who asked for it.
+        assert!(store.pin(kept, 0, 200, "peer-a").is_err());
+    }
+    let mut store = Store::open(path.to_str().unwrap(), &key()).unwrap();
+    assert_eq!(store.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    assert_eq!(
+        store.table_columns("pins").unwrap(),
+        vec![
+            "message_id",
+            "chat_id",
+            "position",
+            "pinned_ms",
+            "pinned_by"
+        ]
+    );
+    assert_eq!(store.messages_for_chat("chat-6").unwrap().len(), 1);
+    assert!(store.pin(kept, 0, 300, "peer-b").unwrap());
+    let pinned = store.pinned_for_chat("chat-6").unwrap();
+    assert_eq!(pinned.len(), 1);
+    assert_eq!(pinned[0].pinned_by, "peer-b");
+    assert_eq!(pinned[0].message.body, "keep this up");
     drop(store);
     fs::remove_file(&path).ok();
 }

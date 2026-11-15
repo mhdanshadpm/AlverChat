@@ -1,7 +1,13 @@
 import type { ReactNode } from 'react';
 import * as MenuPrimitive from '@radix-ui/react-dropdown-menu';
+import { ns, registerNamespace } from '../i18n';
+import chatCatalog from '../i18n/en/chat';
 import { Icon, cx, type IconName } from './Icon';
 import { MENU_WIDTH, measureMenuHeight, placeMenu, type MenuPlacement } from './logic';
+
+registerNamespace('chat', chatCatalog);
+
+const text = ns('chat');
 
 export { placeMenu, measureMenuHeight, MENU_WIDTH };
 export type { MenuPlacement };
@@ -142,7 +148,7 @@ export function ContextMenu({
             <div className="ac-menu__reactions">
               {reactions.map((emoji) => (
                 <button
-                  aria-label={`React with ${emoji}`}
+                  aria-label={text('reactWith', 'React with {{emoji}}', { emoji })}
                   className="ac-menu__reaction"
                   key={emoji}
                   onClick={() => {
@@ -156,7 +162,7 @@ export function ContextMenu({
               ))}
               {onMoreReactions ? (
                 <button
-                  aria-label="More reactions"
+                  aria-label={text('moreReactions', 'More reactions')}
                   className="ac-menu__reaction ac-menu__reaction--more"
                   onClick={onMoreReactions}
                   type="button"

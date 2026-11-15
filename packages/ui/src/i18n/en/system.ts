@@ -1,6 +1,10 @@
 /* SystemStates catalog — connection cards, empty states, the LAN announcement
    and the toast stack. Flat keys only (i18next splits on '.'). */
 export default {
+  /* The three body lines the connection and toast cards pair with their titles. */
+  connNoNetworkBody: 'You’re not connected to a network.',
+  connConnectedBody: 'You’re connected to your LAN.',
+  toastFailedBody: 'Couldn’t reach the recipient.',
   acknowledge: 'Acknowledge',
   acknowledged: 'Acknowledged',
   acknowledgedBy: 'Acknowledged by ({{total}})',
@@ -53,6 +57,8 @@ export default {
   osWindows: 'Windows',
   rowAdapters: 'Network adapters',
   rowDiscovery: 'Discovery port',
+  rowDiscoveryIdle: 'UDP {{port}} not listening',
+  rowDiscoveryLive: 'UDP {{port}} listening',
   rowListening: 'Listening',
   rowListeningOff: 'Not listening',
   rowListeningOn: 'Port {{port}}',
@@ -72,7 +78,9 @@ export default {
   statesEyebrow: 'SYSTEM STATES',
   statesTitle: 'Network and system states',
   toastAcknowledged: 'Announcement acknowledged.',
+  toastDismiss: 'Dismiss notification',
   toastFailed: 'Message failed to send',
+  toastRegion: 'Notifications',
   toastRetry: 'Retry',
   toastSent: 'Message sent',
   toastSentBody: 'Delivered to {{name}}.',

@@ -1,5 +1,35 @@
 /* English catalog for the conversation surfaces (spec 7.1-7.3). Flat keys, no prefix. */
 export default {
+  /* Mic refusals, spoken once from the composer and once from the recorder. */
+  micFallback: 'Your chosen microphone is not connected, so the default one recorded this.',
+  micDenied: 'Microphone access is off, so voice notes cannot be recorded.',
+
+  /* The three transfer actions a file bubble offers, named by what they do. */
+  pauseTransfer: 'Pause transfer',
+  resumeTransfer: 'Resume transfer',
+
+  /* What the bubble and the message menu announce out loud: the multi-select checkbox, a
+     reaction chip, the media tiles, and the quick-reaction row. Every one is an accessible
+     name, so a screen reader says this English — it is as user-facing as a visible label. */
+  selectMessageAria: 'Select message',
+  selectMessageFrom: 'Select message from {{time}}',
+  reactionChip: '{{count}} reaction: {{names}}',
+  reactionChipMany: '{{count}} reactions: {{names}}',
+  reactWith: 'React with {{emoji}}',
+  moreReactions: 'More reactions',
+  playVoiceNote: 'Play voice note',
+  pauseVoiceNote: 'Pause voice note',
+  openImage: 'Open image',
+  openImageNumbered: 'Open image {{number}}',
+  playVideo: 'Play video',
+
+  /* The four states a file bubble leads with, plus the sending percentage. */
+  filePaused: 'Paused',
+  fileFailed: 'Failed',
+  fileComplete: 'Complete',
+  fileSending: 'Sending…',
+  fileSendingPercent: 'Sending… {{percent}}%',
+
   // List pane
   workspace: 'YOUR WORKSPACE',
   messages: 'Messages',
@@ -22,10 +52,7 @@ export default {
   peersDiscovered: '{{count}} peer found',
   peersDiscoveredMany: '{{count}} peers found',
   readyCount: '{{count}} ready',
-  offlineBanner: 'AlverChat cannot see your local network right now.',
-  passphraseBanner: 'Ask a peer for the network passphrase to open an encrypted session.',
-  passphraseAction: 'Set passphrase',
-  dismiss: 'Dismiss',
+
   cancel: 'Cancel',
   close: 'Close',
   back: 'Back',
@@ -37,15 +64,13 @@ export default {
   confirmDeleteEveryone: 'Everyone loses this message. It cannot be undone.',
   shortcutSend: 'Enter to send · Shift+Enter for a new line',
   retry: 'Retry',
-  pause: 'Pause',
-  resume: 'Resume',
+
   cancelTransfer: 'Cancel transfer',
 
   // Row state
-  youPrefix: 'You: ',
+
   typingNow: 'Typing…',
   tapToOpen: 'Open chat',
-  draft: 'Draft: ',
 
   // Row context menu
   pinChat: 'Pin chat',
@@ -55,7 +80,7 @@ export default {
   markUnreadAction: 'Mark as unread',
   clearHistory: 'Clear chat history',
   deleteChatAction: 'Delete chat',
-  openProfile: 'Open profile',
+
   confirmClear: 'Delete every message in this chat on this device?',
   confirmDeleteChat: 'Remove this chat and its history from this device?',
 
@@ -65,8 +90,7 @@ export default {
   chatDetails: 'Chat details',
   searchInChat: 'Search in chat',
   moreOptions: 'More options',
-  viewProfile: 'View profile',
-  selectAll: 'Select all',
+
   encryptionOn: 'End-to-end encrypted on this local network',
   encryptionOff: 'Not encrypted — set the network passphrase',
   peerUnavailable: 'Peer unavailable on the local network',
@@ -82,22 +106,17 @@ export default {
   noMessagesBody: 'Send the first message to start this conversation.',
   pinnedBar: 'Pinned message',
   unpin: 'Unpin',
-  showPinned: 'Show all pinned',
-  systemEvent: 'System',
+
   deletedMessage: 'This message was deleted.',
 
   // Bubble details
-  repliedTo: 'Reply to {{name}}',
+
   forwardedLabel: 'Forwarded',
   editedTag: '(edited)',
   deliverySending: 'Sending',
   deliveryDelivered: 'Delivered',
   deliveryRead: 'Read',
   downloadFile: 'Download {{name}}',
-  openFile: 'Open {{name}}',
-  transferOf: '{{done}} of {{total}}',
-  copyText: 'Copy text',
-  showReactions: 'Seen by',
 
   // Message context menu
   react: 'React',
@@ -109,7 +128,7 @@ export default {
   unpinMessage: 'Unpin',
   star: 'Star',
   unstar: 'Remove star',
-  messageInfo: 'Message info',
+
   deleteForMe: 'Delete for me',
   deleteForEveryone: 'Delete for everyone',
   selectMessage: 'Select',
@@ -131,7 +150,7 @@ export default {
   attachVoice: 'Voice note',
   emoji: 'Emoji',
   recordVoice: 'Record a voice note',
-  stopRecording: 'Stop recording',
+
   send: 'Send',
   recordingFor: 'Recording {{time}} — release to send',
   cancelRecording: 'Cancel recording',
@@ -142,7 +161,7 @@ export default {
   closeBanner: 'Cancel',
   fileTooLarge: '{{name}} is bigger than the {{limit}} MB limit.',
   fileSent: '{{name}} is transferring.',
-  peerGoneToast: 'This peer is not currently available on the local network.',
+
   messageCopied: 'Message copied.',
   deletedForMe: 'Message deleted for you.',
   deletedForEveryone: 'Message deleted for everyone.',
@@ -154,19 +173,17 @@ export default {
   chatCleared: 'Chat history cleared on this device.',
   chatDeleted: 'Chat deleted from this device.',
   featureSoon: 'This action is unavailable in the current build.',
-  callsSoon: 'Calls are unavailable until LAN call signaling is connected.',
+
   forwardedCount: '{{count}} message forwarded',
   forwardedCountMany: '{{count}} messages forwarded',
   forwardPick: 'Choose where to forward',
   forwardSend: 'Forward',
-  noteOptional: 'Add a note (optional)',
 
   // In-chat search
   searchResults: '{{count}} match',
   searchResultsMany: '{{count}} matches',
   searchPlaceholder: 'Search this chat…',
   noResultsTitle: 'Nothing found',
-  noResultsBody: 'No message in this chat contains “{{query}}”.',
 
   // Details pane
   detailsTitle: 'Chat details',
@@ -182,8 +199,7 @@ export default {
   storageUsed: '{{used}} used',
   muteToggle: 'Mute notifications',
   encryptionTitle: 'Encryption',
-  passphraseTitle: 'Network passphrase',
-  fingerprintTitle: 'Peer fingerprint',
+
   exportChat: 'Export this chat',
   exportReady: 'Export written to {{path}}',
   linkCopied: 'Link copied.',
@@ -203,6 +219,5 @@ export default {
   shortcutCopy: 'Ctrl+C',
   shortcutEdit: 'Ctrl+E',
   shortcutForward: 'Ctrl+F',
-  shortcutInfo: 'Ctrl+I',
-  shortcutDelete: 'Ctrl+Del',
+
 };

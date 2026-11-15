@@ -66,11 +66,14 @@ import {
   nextIndexOf,
   avatarPaletteFor,
   placeMenu,
+  presenceForPeer,
   reactionTooltip,
+  statusLineFor,
   transferPercent,
   typeaheadIndex,
   waveformBars,
   waveformProgress,
+  withinEditWindow,
 } from './logic';
 
 /* ------------------------------------------------------------------ *
@@ -224,6 +227,34 @@ describe('composite group avatar members', () => {
   });
 });
 
+describe('presence a peer declared about itself', () => {
+  it('prefers the declared token over our liveness copy', () => {
+    const available = { online: true, status: 'Available on LAN · end-to-end encrypted' };
+    expect(presenceForPeer({ ...available, presence: 'away' })).toBe('away');
+    expect(presenceForPeer({ ...available, presence: 'Busy' })).toBe('busy');
+  });
+
+  it('falls back to matching the status line when nothing was declared', () => {
+    expect(presenceForPeer({ online: true, status: 'In a meeting' })).toBe('busy');
+    expect(presenceForPeer({ online: true, status: 'Do not disturb' })).toBe('busy');
+    expect(presenceForPeer({ online: true, status: 'Away from desk' })).toBe('away');
+    expect(presenceForPeer({ online: true, status: 'Active now' })).toBe('online');
+  });
+
+  it('keeps offline winning, and unknown tokens out', () => {
+    expect(presenceForPeer({ online: false, status: 'Offline', presence: 'online' })).toBe('offline');
+    expect(presenceForPeer({ online: true, status: 'Active now', presence: 'visible' })).toBe('online');
+    expect(presenceForPeer({ online: true, status: 'In a meeting', presence: '' })).toBe('busy');
+  });
+
+  it('shows the line the peer typed, else our own', () => {
+    expect(statusLineFor({ status: 'Available on LAN', statusLine: 'Reviewing designs' })).toBe('Reviewing designs');
+    expect(statusLineFor({ status: 'Available on LAN', statusLine: '   ' })).toBe('Available on LAN');
+    expect(statusLineFor({ status: 'Available on LAN' })).toBe('Available on LAN');
+    expect(statusLineFor({})).toBe('');
+  });
+});
+
 describe('bubble delivery ticks', () => {
   it('draws nothing on incoming messages', () => {
     for (const delivery of ['sending', 'delivered', 'read'] as const) {
@@ -299,6 +330,19 @@ describe('file bubble logic', () => {
     expect(formatDuration(0)).toBe('00:00');
     expect(formatDuration(156)).toBe('02:36');
     expect(formatDuration(3733)).toBe('01:02:13');
+    // The rule the composer offers Edit on is the one `edit_window` enforces in Rust, so the
+    // boundary is pinned on both sides over the same instants: 15 minutes of window from a
+    // message stamped at 1 000 ms stays open to 901 000 ms and shuts at 901 001 ms, and a
+    // zero-minute window still allows the same instant it was written at. An unreadable stamp
+    // keeps the message editable rather than locking it, and a clock that runs behind the
+    // message's own stamp counts as inside.
+    expect(withinEditWindow(1_000, 901_000, 15)).toBe(true);
+    expect(withinEditWindow(1_000, 901_001, 15)).toBe(false);
+    expect(withinEditWindow(1_000, 1_000, 0)).toBe(true);
+    expect(withinEditWindow(1_000, 1_001, 0)).toBe(false);
+    expect(withinEditWindow(Number.NaN, 9_999_999, 15)).toBe(true);
+    expect(withinEditWindow(1_000, 500, 0)).toBe(true);
+    expect(withinEditWindow(0, 0, -5)).toBe(true);
     expect(transferPercent(6_815_744, 12_435_425)).toBe(55);
     expect(transferPercent(10, 0)).toBe(0);
     expect(clampPercent(140)).toBe(100);
@@ -570,7 +614,9 @@ describe('SettingsScreen helpers', () => {
       'about',
     ]);
     expect(Object.keys(CATEGORY_ICONS).sort()).toEqual([...CATEGORY_ORDER].sort());
-    // The about panel reads this constant, so it has to follow the release version.
+    // APP_VERSION is read out of `apps/desktop/src-tauri/tauri.conf.json` — the file whose version
+    // the bundler stamps and the updater compares — so this line is really asking whether the
+    // release manifest and the workspace manifest still name the same build.
     expect(APP_VERSION).toBe(packageJson.version);
   });
 

@@ -1,7 +1,13 @@
 export const APP_NAME = "AlverChat";
-export type Peer = { id:string; name:string; initials:string; color:string; online:boolean; status:string; preview:string; time:string; unread?:number; group?:boolean; typing?:boolean; muted?:boolean; pinned?:boolean };
-export type ChatMessage = { id:string; sender:string; text:string; time:string; timestampMs?:number; mine?:boolean; read?:boolean; deliveryStatus?:'pending'|'delivered'; kind?:'text'|'file'|'event'|'deleted'; fileName?:string; edited?:boolean; replyTo?:string };
-export type OverlaySnapshot = { peers:Peer[]; unreadTotal:number; open:boolean; dockSide:'left'|'right'; snapToEdge:boolean; bubblesEnabled:boolean; bubbleAutoHideSeconds:number };
+/** `presence` and `statusLine` are what the peer itself declared on the wire; `status`
+ * is our own liveness copy, so a hidden status still has a sensible line under the name. */
+export type Peer = { id:string; name:string; initials:string; color:string; online:boolean; status:string; presence?:string; statusLine?:string; preview:string; time:string; lastMessageMs?:number; unread?:number; group?:boolean; typing?:boolean; muted?:boolean; pinned?:boolean };
+export type ChatMessage = { id:string; sender:string; text:string; time:string; timestampMs?:number; mine?:boolean; read?:boolean; deliveryStatus?:'pending'|'delivered'; kind?:'text'|'file'|'event'|'deleted'; fileName?:string; edited?:boolean; forwarded?:boolean; replyTo?:string };
+/** One unacknowledged announcement the dock icon may surface. */
+export type DockAnnouncement = { id:string; groupId:string; groupName:string; authorName:string; text:string; createdMs:number };
+/** A call the shell has seen signalled but not seen end. `startedMs` is 0 while it rings. */
+export type LiveCall = { chatId:string; peerName:string; ongoing:boolean; startedMs:number };
+export type OverlaySnapshot = { peers:Peer[]; unreadTotal:number; open:boolean; dockSide:'left'|'right'; snapToEdge:boolean; bubblesEnabled:boolean; bubbleAutoHideSeconds:number; showMessagePreview:boolean; opacityPercent:number; idleIcon:'logo'|'photo'; iconMorphEnabled:boolean; iconMorphDelaySeconds:number; notificationsQuiet:boolean; liveCall:LiveCall|null; announcements:DockAnnouncement[] };
 
 /** A signed group roster as the storage layer keeps it (the epoch guards replay). */
 export type Group = {
@@ -35,12 +41,15 @@ export type Attachment = {
   /** 0-1 while a transfer is running; `null` once complete. */
   progress:number|null;
   transferRateBytesPerSecond:number;
-  /** Set when the app auto-downloaded a small file to keep traffic low. */
-  autoDownloaded?:boolean;
-  /** Local `asset:` or data URL for previews; `null` until the bytes arrive. */
-  previewUrl?:string|null;
   durationMs?:number;
 };
+
+/**
+ * Who this device is. `peerId` is what the wire puts in a `from` field; `fingerprint` is
+ * the digest a user reads out over another channel to prove a device is the one they mean.
+ * They are not the same string and the desktop says so with one struct on both sides.
+ */
+export type Identity = { peerId:string; fingerprint:string };
 
 /** One emoji with the senders behind it, so reactions render without a second round trip. */
 export type ReactionTally = { emoji:string; peers:string[]; mine:boolean };
@@ -110,14 +119,14 @@ export type AppSettings = {
   announcementsFromAdminsOnly:boolean;
 };
 export type PermissionStatus = { kind:string; label:string; hint:string; state:'granted'|'denied'|'unknown'; deepLink:string };
-export type ConnectionReport = { listening:boolean; port:number; peers:number; onlinePeers:number; adapters:string[]; discoveryPort:number; warnings:string[] };
+export type ConnectionReport = { listening:boolean; port:number; peers:number; onlinePeers:number; adapters:string[]; discoveryPort:number; discoveryActive:boolean; warnings:string[] };
 export type BackupResult = { path:string; bytes:number; createdMs:number };
 export type ExportResult = { path:string; messages:number };
 
 export interface PlatformBridge {
   listPeers(): Promise<Peer[]>;
   listMessages(chatId:string): Promise<ChatMessage[]>;
-  /** `replyToId` quotes an earlier message; the desktop shell ignores it until storage has a column. */
+  /** `replyToId` quotes an earlier message; the desktop stores the quote in `messages.reply_to` (migration v5). */
   sendMessage(chatId:string,text:string,replyToId?:string): Promise<ChatMessage>;
   overlaySnapshot(): Promise<OverlaySnapshot>;
   toggleCompact(): Promise<void>;
@@ -140,7 +149,7 @@ export interface PlatformBridge {
   /** Unsends for every participant; only the original sender may do it, inside the edit window. */
   deleteForEveryone(messageId:string): Promise<boolean>;
   editMessageLocal(messageId:string,text:string): Promise<boolean>;
-  getMyIdentity(): Promise<{ peerId: string; fingerprint: string }>;
+  getMyIdentity(): Promise<Identity>;
   getSettings(): Promise<AppSettings>;
   updateSettings(patch:Partial<AppSettings>): Promise<AppSettings>;
   setLaunchAtLogin(enabled:boolean): Promise<boolean>;
@@ -196,6 +205,8 @@ export interface PlatformBridge {
   /** Stores a 256 px, EXIF-stripped JPEG for my peer card; `null` removes it. */
   setAvatar(avatarDataUrl:string|null): Promise<string|null>;
   getAvatar(): Promise<string|null>;
+  /** The photo a peer publishes, pulled over the LAN; `null` when they publish none. */
+  getPeerAvatar(peerId:string): Promise<string|null>;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -219,7 +230,7 @@ export const emptyBrowserBridge:PlatformBridge = {
  async listPeers(){return []},
  async listMessages(){return []},
  async sendMessage(){return unavailable('Messaging')},
- async overlaySnapshot(){return {peers:[],unreadTotal:0,open:false,dockSide:'right',snapToEdge:true,bubblesEnabled:true,bubbleAutoHideSeconds:7}},
+ async overlaySnapshot(){return {peers:[],unreadTotal:0,open:false,dockSide:'right',snapToEdge:true,bubblesEnabled:true,bubbleAutoHideSeconds:7,showMessagePreview:true,opacityPercent:90,idleIcon:'logo',iconMorphEnabled:true,iconMorphDelaySeconds:5,notificationsQuiet:false,liveCall:null,announcements:[]}},
  async toggleCompact(){/* browser preview */},
  async hideCompact(){/* browser preview */},
  async openFullApp(){/* browser preview */},
@@ -250,7 +261,7 @@ export const emptyBrowserBridge:PlatformBridge = {
  async permissionStatus(kind){return {kind, label:kind, hint:'', state:'unknown', deepLink:''}},
  async openPermissionSettings(){return unavailable('System settings')},
  async openFirewallGuide(){return []},
- async runConnectionTest(){return {listening:false,port:0,peers:0,onlinePeers:0,adapters:[],discoveryPort:47986,warnings:['Running outside the desktop app.']}},
+ async runConnectionTest(){return {listening:false,port:0,peers:0,onlinePeers:0,adapters:[],discoveryPort:47986,discoveryActive:false,warnings:['Running outside the desktop app.']}},
  async createBackup(){return unavailable('Backups')},
  async listBackups(){return []},
  async restoreBackup(){return unavailable('Restore')},
@@ -266,6 +277,7 @@ export const emptyBrowserBridge:PlatformBridge = {
  async leaveGroup(){return unavailable('Groups')},
  async setAvatar(){return null},
  async getAvatar(){return null},
+ async getPeerAvatar(){return null},
  async pinMessage(){return []},
  async pinnedMessages(){return []},
  async starMessage(){return true},

@@ -1,4 +1,4 @@
-import { DEFAULT_SETTINGS, type Announcement, type AppSettings, type Attachment, type CallEvent, type ChatMessage, type ConnectionReport, type ExportResult, type Group, type GroupPatch, type OverlaySnapshot, type PinnedMessage, type ReactionTally, type SearchHit, type UnreadState, type Peer, type PermissionStatus, type PlatformBridge } from './index';
+import { DEFAULT_SETTINGS, type Announcement, type AppSettings, type Attachment, type CallEvent, type ChatMessage, type ConnectionReport, type ExportResult, type Group, type GroupPatch, type LiveCall, type OverlaySnapshot, type PinnedMessage, type ReactionTally, type SearchHit, type UnreadState, type Peer, type PermissionStatus, type PlatformBridge } from './index';
 
 /**
  * MOCK MODE. Selected with `?mock=1`, and `?mock=1&scenario=<name>` for a
@@ -19,14 +19,18 @@ export type MockScenario =
   | 'group-call'
   | 'screen-share'
   | 'dnd'
-  | 'dark';
+  | 'morph-off'
+  | 'morph-fast'
+  | 'speaker'
+  | 'dark'
+  | 'first-run';
 
 const search = (): URLSearchParams =>
   typeof window === 'undefined' ? new URLSearchParams() : new URLSearchParams(window.location.search);
 
 export function mockScenario(): MockScenario {
   const raw = search().get('scenario');
-  const known: MockScenario[] = ['default','empty','scanning','no-network','firewall','reconnecting','offline-peer','incoming-call','active-call','group-call','screen-share','dnd','dark'];
+  const known: MockScenario[] = ['default','empty','scanning','no-network','firewall','reconnecting','offline-peer','incoming-call','active-call','group-call','screen-share','dnd','morph-off','morph-fast','speaker','dark','first-run'];
   return known.includes(raw as MockScenario) ? (raw as MockScenario) : 'default';
 }
 
@@ -42,21 +46,25 @@ const at = (minutesAgo: number): { time: string; timestampMs: number } => ({
   timestampMs: ago(minutesAgo),
 });
 
+/**
+ * `presence`/`statusLine` are what a heartbeat pong carries when the peer lets us see its
+ * status, so two rows exercise the declared path and the rest the `status` fallback.
+ */
 const PEOPLE: Peer[] = [
-  { id: 'peer-arjun', name: 'Arjun Kumar', initials: 'AK', color: 'blue', online: true, status: 'Online', preview: 'Invoice updated. Please check.', time: time(4), unread: 3 },
-  { id: 'peer-fathima', name: 'Fathima P', initials: 'FP', color: 'rose', online: true, status: 'Online', preview: 'Can you share the stock report?', time: time(11), unread: 2 },
-  { id: 'peer-sarath', name: 'Sarath Shailan', initials: 'SS', color: 'green', online: true, status: 'Active now', preview: 'Video ready, please review.', time: time(22) },
-  { id: 'peer-samyuktha', name: 'Samyuktha S', initials: 'SK', color: 'peach', online: true, status: 'Active now', preview: 'Looks great!', time: time(35) },
-  { id: 'peer-vishnu', name: 'Vishnu K', initials: 'VK', color: 'purple', online: false, status: 'Last seen 5 min ago', preview: 'Noted, thanks.', time: time(300) },
-  { id: 'peer-anu', name: 'Anu M', initials: 'AN', color: 'cyan', online: false, status: 'Last seen 32 min ago', preview: 'Adding it to the list.', time: time(32) },
-  { id: 'peer-deepa', name: 'Deepa R', initials: 'DP', color: 'yellow', online: true, status: 'In a meeting', preview: 'Report is attached.', time: time(48), muted: true },
+  { id: 'peer-arjun', name: 'Arjun Kumar', initials: 'AK', color: 'blue', online: true, status: 'Online', preview: 'Invoice updated. Please check.', time: time(4), lastMessageMs: ago(4), unread: 3 },
+  { id: 'peer-fathima', name: 'Fathima P', initials: 'FP', color: 'rose', online: true, status: 'Online', preview: 'Can you share the stock report?', time: time(11), lastMessageMs: ago(11), unread: 2 },
+  { id: 'peer-sarath', name: 'Sarath Shailan', initials: 'SS', color: 'green', online: true, status: 'Active now', presence: 'away', statusLine: 'Back at 3:30', preview: 'Video ready, please review.', time: time(22), lastMessageMs: ago(22) },
+  { id: 'peer-samyuktha', name: 'Samyuktha S', initials: 'SK', color: 'peach', online: true, status: 'Active now', preview: 'Looks great!', time: time(35), lastMessageMs: ago(35) },
+  { id: 'peer-vishnu', name: 'Vishnu K', initials: 'VK', color: 'purple', online: false, status: 'Last seen 5 min ago', preview: 'Noted, thanks.', time: time(300), lastMessageMs: ago(300) },
+  { id: 'peer-anu', name: 'Anu M', initials: 'AN', color: 'cyan', online: false, status: 'Last seen 32 min ago', preview: 'Adding it to the list.', time: time(32), lastMessageMs: ago(32) },
+  { id: 'peer-deepa', name: 'Deepa R', initials: 'DP', color: 'yellow', online: true, status: 'In a meeting', presence: 'busy', statusLine: 'Quarter-close review', preview: 'Report is attached.', time: time(48), lastMessageMs: ago(48), muted: true },
 ];
 
 const GROUPS: Peer[] = [
-  { id: 'chat-billing', name: 'Billing Team', initials: 'BT', color: 'violet', online: true, status: '12 members', preview: 'Anu: Purchase entry completed.', time: time(8), group: true, unread: 5, pinned: true },
-  { id: 'chat-design', name: 'Design Team', initials: 'DT', color: 'green', online: true, status: '6 members', preview: 'You: New poster added.', time: time(46), group: true },
-  { id: 'chat-alverconnect', name: 'Project AlverConnect', initials: 'PA', color: 'peach', online: true, status: '9 members', preview: 'Design review at 4 PM.', time: time(66), group: true, pinned: true },
-  { id: 'everyone', name: 'Everyone', initials: 'EV', color: 'blue', online: true, status: 'All members (23)', preview: 'Office network maintenance today.', time: time(120), group: true },
+  { id: 'chat-billing', name: 'Billing Team', initials: 'BT', color: 'violet', online: true, status: '12 members', preview: 'Anu: Purchase entry completed.', time: time(8), lastMessageMs: ago(8), group: true, unread: 5, pinned: true },
+  { id: 'chat-design', name: 'Design Team', initials: 'DT', color: 'green', online: true, status: '6 members', preview: 'You: New poster added.', time: time(46), lastMessageMs: ago(46), group: true },
+  { id: 'chat-alverconnect', name: 'Project AlverConnect', initials: 'PA', color: 'peach', online: true, status: '9 members', preview: 'Design review at 4 PM.', time: time(66), lastMessageMs: ago(66), group: true, pinned: true },
+  { id: 'everyone', name: 'Everyone', initials: 'EV', color: 'blue', online: true, status: 'All members (23)', preview: 'Office network maintenance today.', time: time(120), lastMessageMs: ago(120), group: true },
 ];
 
 const msg = (over: Partial<ChatMessage> & Pick<ChatMessage, 'id' | 'sender' | 'text'>): ChatMessage => ({
@@ -72,6 +80,13 @@ const CONVERSATIONS: Record<string, ChatMessage[]> = {
     msg({ id: 'm5', sender: 'Arjun Kumar', text: 'Purchase entry completed for today.', ...at(60) }),
     msg({ id: 'm6', sender: 'Arjun Kumar', text: 'This message was deleted', ...at(58), kind: 'deleted' }),
     msg({ id: 'm7', sender: 'Arjun Kumar', text: 'Stock_Report.xlsx', fileName: 'Stock_Report.xlsx', kind: 'file', ...at(20) }),
+    msg({ id: 'm8', sender: 'Arjun Kumar', text: 'Quarterly numbers from the finance room.', forwarded: true, ...at(18) }),
+  ],
+  'peer-sarath': [
+    msg({ id: 's1', sender: 'Sarath Shailan', text: 'Cut the launch film down to 40 seconds.', ...at(70) }),
+    msg({ id: 's2', sender: 'You', text: 'voice-note-02.m4a', fileName: 'voice-note-02.m4a', kind: 'file', mine: true, deliveryStatus: 'delivered', ...at(66) }),
+    msg({ id: 's4', sender: 'Sarath Shailan', text: 'poster-option-b.png', fileName: 'poster-option-b.png', kind: 'file', ...at(40) }),
+    msg({ id: 's3', sender: 'Sarath Shailan', text: 'Video ready, please review.', ...at(22) }),
   ],
   'chat-billing': [
     msg({ id: 'g1', sender: 'Anu', text: 'Purchase entry completed for today.' }),
@@ -89,7 +104,15 @@ const rich = (chatId: string): ChatMessage[] => CONVERSATIONS[chatId] ?? [
   msg({ id: `${chatId}-1`, sender: 'You', text: 'Send a message to start this conversation.', mine: true, ...at(1) }),
 ];
 
-let settings: AppSettings = { ...DEFAULT_SETTINGS, displayName: 'Muhammad Anshad', hotkey: 'CmdOrCtrl+Alt+S', pinnedChats: ['chat-alverconnect', 'chat-billing'] };
+let settings: AppSettings = {
+  ...DEFAULT_SETTINGS,
+  // The shell gates on an empty display name, so this is the only way to open onboarding.
+  displayName: mockScenario() === 'first-run' ? '' : 'Muhammad Anshad',
+  // An output id a real `enumerateDevices` would have supplied once a speaker was chosen.
+  speaker: mockScenario() === 'speaker' ? 'mock-output-1' : 'default',
+  hotkey: 'CmdOrCtrl+Alt+S',
+  pinnedChats: ['chat-alverconnect', 'chat-billing'],
+};
 let peers: Peer[] = [...GROUPS, ...PEOPLE];
 let seq = 0;
 
@@ -115,6 +138,7 @@ function upsertGroupPeer(group: Group): void {
     status: `${groupMembers(group).length} members`,
     preview: existing?.preview ?? 'Group created',
     time: existing?.time ?? time(0),
+    lastMessageMs: existing?.lastMessageMs ?? Date.now(),
     unread: existing?.unread,
     group: true,
     pinned: existing?.pinned,
@@ -146,13 +170,14 @@ const STARRED = new Set<string>(['g5', 'm2']);
 
 const ATTACHMENTS: Record<string, Attachment[]> = {
   'peer-arjun': [
-    { id: 'a1', chatId: 'peer-arjun', messageId: 'm7', kind: 'file', name: 'Stock_Report.xlsx', bytes: 4_812_034, mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', state: 'done', progress: null, transferRateBytesPerSecond: 0, autoDownloaded: true },
+    { id: 'a1', chatId: 'peer-arjun', messageId: 'm7', kind: 'file', name: 'Stock_Report.xlsx', bytes: 4_812_034, mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', state: 'done', progress: null, transferRateBytesPerSecond: 0 },
     { id: 'a2', chatId: 'peer-arjun', kind: 'file', name: 'GST_Reconciliation_Nov.xlsx', bytes: 18_400_000, mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', state: 'downloading', progress: 0.42, transferRateBytesPerSecond: 21_500_000 },
   ],
   'peer-sarath': [
     { id: 'a3', chatId: 'peer-sarath', kind: 'video', name: 'launch-film-v3.mp4', bytes: 246_000_000, mime: 'video/mp4', state: 'paused', progress: 0.68, transferRateBytesPerSecond: 0 },
     { id: 'a4', chatId: 'peer-sarath', kind: 'image', name: 'poster-option-a.png', bytes: 2_100_000, mime: 'image/png', state: 'failed', progress: 0.11, transferRateBytesPerSecond: 0 },
-    { id: 'a5', chatId: 'peer-sarath', kind: 'audio', name: 'voice-note-02.m4a', bytes: 640_000, mime: 'audio/mp4', state: 'done', progress: null, transferRateBytesPerSecond: 0, durationMs: 42_000 },
+    { id: 'a5', chatId: 'peer-sarath', messageId: 's2', kind: 'audio', name: 'voice-note-02.m4a', bytes: 640_000, mime: 'audio/mp4', state: 'done', progress: null, transferRateBytesPerSecond: 0, durationMs: 42_000 },
+    { id: 'a7', chatId: 'peer-sarath', messageId: 's4', kind: 'image', name: 'poster-option-b.png', bytes: 1_840_000, mime: 'image/png', state: 'done', progress: null, transferRateBytesPerSecond: 0 },
   ],
   'chat-design': [
     { id: 'a6', chatId: 'chat-design', kind: 'file', name: 'AlverConnect_Guidelines.pdf', bytes: 9_400_000, mime: 'application/pdf', state: 'uploading', progress: 0.27, transferRateBytesPerSecond: 12_000_000 },
@@ -171,7 +196,6 @@ const CALLS: CallEvent[] = [
   { id: 'c4', chatId: 'peer-fathima', kind: '1to1', status: 'declined', caller: 'peer-fathima', callerName: 'Fathima P', startedMs: Date.now() - 1_200_000, endedMs: null, participants: ['peer-fathima'] },
 ];
 
-const typingChats = new Set<string>(['chat-billing']);
 const UNREAD = new Map<string, number>();
 
 const chatName = (chatId: string): string =>
@@ -203,7 +227,17 @@ function scenarioPeers(): Peer[] {
   return peers;
 }
 
+/** The call the floating icon should wear, per scenario, mirroring the shell registry. */
+function scenarioLiveCall(): LiveCall | null {
+  const scenario = mockScenario();
+  if (scenario === 'incoming-call') return { chatId: 'peer-fathima', peerName: 'Fathima P', ongoing: false, startedMs: 0 };
+  if (scenario === 'group-call') return { chatId: 'chat-billing', peerName: 'Billing Team', ongoing: true, startedMs: Date.now() - 45_000 };
+  if (scenario === 'active-call') return { chatId: 'peer-arjun', peerName: 'Arjun Kumar', ongoing: true, startedMs: Date.now() - 134_000 };
+  return null;
+}
+
 function snapshot(): OverlaySnapshot {
+  const scenario = mockScenario();
   const list = scenarioPeers();
   return {
     peers: list,
@@ -211,12 +245,110 @@ function snapshot(): OverlaySnapshot {
     open: false,
     dockSide: settings.screenCorner.startsWith('left') ? 'left' : 'right',
     snapToEdge: settings.snapToEdge,
-    bubblesEnabled: settings.bubblesEnabled && !settings.notificationsMuted,
+    bubblesEnabled: settings.bubblesEnabled,
     bubbleAutoHideSeconds: settings.bubbleAutoHideSeconds,
+    showMessagePreview: settings.showMessagePreview,
+    opacityPercent: settings.opacityPercent,
+    idleIcon: settings.idleIcon,
+    iconMorphEnabled: scenario !== 'morph-off',
+    iconMorphDelaySeconds: scenario === 'morph-fast' ? 1 : settings.iconMorphDelaySeconds,
+    notificationsQuiet: settings.notificationsMuted || scenario === 'dnd',
+    liveCall: scenarioLiveCall(),
+    announcements: [],
   };
 }
 
 const delay = <T,>(value: T): Promise<T> => new Promise(resolve => setTimeout(() => resolve(value), 40));
+
+/**
+ * A second of silence, made once and reused. `attachmentData` feeds `new Audio()`, and a
+ * voice fixture with no bytes behind it can only ever answer "not on this device".
+ */
+let voiceWav: string | null = null;
+const voiceData = (): string | null => {
+  if (voiceWav === null && typeof window !== 'undefined') {
+    const samples = 8_000;
+    const bytes = new Uint8Array(44 + samples * 2);
+    const view = new DataView(bytes.buffer);
+    const tag = (offset: number, text: string) => { for (let i = 0; i < text.length; i += 1) view.setUint8(offset + i, text.charCodeAt(i)); };
+    tag(0, 'RIFF'); view.setUint32(4, 36 + samples * 2, true); tag(8, 'WAVE');
+    tag(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+    view.setUint32(24, 8000, true); view.setUint32(28, 16000, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+    tag(36, 'data'); view.setUint32(40, samples * 2, true);
+    voiceWav = URL.createObjectURL(new Blob([bytes], { type: 'audio/wav' }));
+  }
+  return voiceWav;
+};
+
+/**
+ * One picture's worth of bytes, made once. A preview fixture has to be something an
+ * `<img>` actually draws, or the media grid and the image bubble screenshot as an empty
+ * frame and prove nothing about the layout.
+ */
+let pictureBytes: string | null = null;
+const pictureData = (): string | null => {
+  if (pictureBytes === null && typeof window !== 'undefined') {
+    const svg =
+      '<svg xmlns="http://www.w3.org/2000/svg" width="480" height="320">' +
+      '<defs><linearGradient id="s" x1="0" y1="0" x2="0" y2="1">' +
+      '<stop offset="0" stop-color="#1d2b50"/><stop offset="1" stop-color="#e8a87c"/></linearGradient></defs>' +
+      '<rect width="480" height="320" fill="url(#s)"/>' +
+      '<circle cx="150" cy="96" r="46" fill="#f6e7cb" opacity="0.9"/>' +
+      '<path d="M0 250 L132 176 L244 236 L356 158 L480 224 L480 320 L0 320 Z" fill="#12203c" opacity="0.8"/>' +
+      '</svg>';
+    pictureBytes = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
+  }
+  return pictureBytes;
+};
+
+/**
+ * Bytes the mock still holds from a send, keyed by attachment id. `sendFile` is handed a
+ * data URL, so a picture sent in mock mode can be read back the way the desktop reads a
+ * downloaded file.
+ */
+const HELD_BYTES: Record<string, string> = {};
+
+/** What `attachmentData` answers for one id: what was sent, or a fixture of its kind. */
+const storedBytes = (attachmentId: string): string | null => {
+  const held = HELD_BYTES[attachmentId];
+  if (held) return held;
+  for (const list of Object.values(ATTACHMENTS)) {
+    const hit = list.find(item => item.id === attachmentId);
+    if (!hit) continue;
+    if (hit.kind === 'audio') return voiceData();
+    return hit.kind === 'image' ? pictureData() : null;
+  }
+  return null;
+};
+
+/**
+ * The one peer in the mock who publishes a photo. Drawn on a canvas rather than
+ * inlined as bytes, so the surfaces that show peer pictures can be checked with a
+ * real image instead of the initials variant.
+ */
+let peerPhoto: string | null = null;
+const peerPhotoDataUrl = (): string | null => {
+  if (peerPhoto === null && typeof document !== 'undefined') {
+    const canvas = document.createElement('canvas');
+    canvas.width = 128;
+    canvas.height = 128;
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      ctx.fillStyle = '#2f6bd8';
+      ctx.fillRect(0, 0, 128, 128);
+      ctx.fillStyle = '#f2c14e';
+      ctx.beginPath();
+      ctx.arc(64, 52, 26, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#e8f1ff';
+      ctx.beginPath();
+      ctx.ellipse(64, 122, 44, 34, 0, Math.PI, Math.PI * 2);
+      ctx.fill();
+      peerPhoto = canvas.toDataURL('image/png');
+    }
+  }
+  return peerPhoto;
+};
 
 export const mockBridge: PlatformBridge = {
   ...emptyMockMethods(),
@@ -230,7 +362,7 @@ export const mockBridge: PlatformBridge = {
     const created: ChatMessage = { id: `out-${++seq}`, sender: 'You', text, ...at(0), mine: true, read: true, kind: 'text', deliveryStatus: 'delivered', replyTo: replyToId };
     const next = [...(CONVERSATIONS[chatId] ?? []), created];
     CONVERSATIONS[chatId] = next;
-    peers = peers.map(peer => (peer.id === chatId ? { ...peer, preview: text, time: created.time } : peer));
+    peers = peers.map(peer => (peer.id === chatId ? { ...peer, preview: text, time: created.time, lastMessageMs: created.timestampMs } : peer));
     return delay(created);
   },
   overlaySnapshot: () => delay(snapshot()),
@@ -283,6 +415,7 @@ export const mockBridge: PlatformBridge = {
       onlinePeers: list.filter(peer => peer.online).length,
       adapters: ['Ethernet (192.168.1.24)', 'Wi-Fi (192.168.1.88)'],
       discoveryPort: 47_986,
+      discoveryActive: scenario !== 'no-network' && scenario !== 'firewall',
       warnings: scenario === 'no-network' ? ['You are not connected to a network.']
         : scenario === 'firewall' ? ['AlverChat is blocked by your firewall.']
         : scenario === 'reconnecting' ? ['Trying to restore your connection to the network.'] : [],
@@ -326,10 +459,10 @@ export const mockBridge: PlatformBridge = {
       for (const messageId of messageIds) {
         const source = Object.values(CONVERSATIONS).flatMap(items => items).find(item => item.id === messageId);
         if (!source) continue;
-        list.push(msg({ id: `fwd-${++seq}`, sender: 'You', text: source.text, mine: true, ...at(0), read: true, deliveryStatus: 'delivered', fileName: source.fileName, kind: source.kind === 'file' ? 'file' : 'text' }));
+        list.push(msg({ id: `fwd-${++seq}`, sender: 'You', text: source.text, mine: true, ...at(0), read: true, deliveryStatus: 'delivered', fileName: source.fileName, forwarded: true, kind: source.kind === 'file' ? 'file' : 'text' }));
         copied += 1;
       }
-      peers = peers.map(peer => (peer.id === chatId ? { ...peer, time: time(0) } : peer));
+      peers = peers.map(peer => (peer.id === chatId ? { ...peer, time: time(0), lastMessageMs: Date.now() } : peer));
     }
     return delay(copied);
   },
@@ -347,7 +480,6 @@ export const mockBridge: PlatformBridge = {
     return delay(hits.slice(0, 80));
   },
   setTyping: (chatId, typing) => {
-    if (typing) typingChats.add(chatId); else typingChats.delete(chatId);
     peers = peers.map(peer => (peer.id === chatId ? { ...peer, typing } : peer));
     return delay(undefined);
   },
@@ -371,9 +503,10 @@ export const mockBridge: PlatformBridge = {
       : /\.m4a|\.mp3|\.wav|\.ogg$/i.test(fileName) ? 'audio' : 'file';
     const bytes = Math.max(1, Math.round((dataUrl.length - dataUrl.indexOf(',') - 1) * 0.75)) || 256_000;
     const created: Attachment = { id: `a-${++seq}`, chatId, kind, name: fileName, bytes, mime: 'application/octet-stream', state: 'uploading', progress: 0.05, transferRateBytesPerSecond: 24_000_000, durationMs };
+    HELD_BYTES[created.id] = dataUrl;
     (ATTACHMENTS[chatId] ?? (ATTACHMENTS[chatId] = [])).push(created);
     (CONVERSATIONS[chatId] ?? (CONVERSATIONS[chatId] = [])).push(msg({ id: `file-${seq}`, sender: 'You', text: fileName, mine: true, kind: 'file', fileName, ...at(0), read: true, deliveryStatus: 'delivered' }));
-    peers = peers.map(peer => (peer.id === chatId ? { ...peer, preview: fileName, time: time(0) } : peer));
+    peers = peers.map(peer => (peer.id === chatId ? { ...peer, preview: fileName, time: time(0), lastMessageMs: Date.now() } : peer));
     return delay(created);
   },
   controlTransfer: (attachmentId, action) => {
@@ -388,7 +521,7 @@ export const mockBridge: PlatformBridge = {
     return delay(null);
   },
   openAttachment: () => delay(null),
-  attachmentData: () => delay(null),
+  attachmentData: (attachmentId) => delay(storedBytes(attachmentId)),
   listAnnouncements: (groupId) => delay(ANNOUNCEMENTS.filter(item => item.groupId === groupId)),
   sendAnnouncement: (groupId, text) => {
     const created: Announcement = { id: `an-${++seq}`, groupId, author: 'me', authorName: 'You', text, createdMs: Date.now(), acknowledgedBy: [] };
@@ -436,6 +569,7 @@ export const mockBridge: PlatformBridge = {
   },
   setAvatar: (dataUrl) => { avatar = dataUrl; return delay(avatar); },
   getAvatar: () => delay(avatar),
+  getPeerAvatar: (peerId) => delay(peerId === 'peer-arjun' ? peerPhotoDataUrl() : null),
 };
 
 /** Windows-only stubs: the mock never opens native overlay windows. */

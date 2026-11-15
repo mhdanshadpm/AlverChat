@@ -1,7 +1,7 @@
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand_core::OsRng;
 
-/// A fresh local identity. Persist `secret` only through the OS keychain layer.
+/// A fresh local identity. Persist `secret` only through the platform secret store.
 pub struct Identity {
     secret: SigningKey,
 }
@@ -61,6 +61,17 @@ mod tests {
         assert_eq!(identity.peer_id(), restored.peer_id());
         assert_eq!(identity.fingerprint(), restored.fingerprint());
         assert_eq!(identity.fingerprint().split(' ').count(), 16);
+    }
+
+    #[test]
+    fn two_labels_mean_two_different_spellings() {
+        let identity = Identity::from_secret([7; 32]);
+        assert_ne!(identity.peer_id(), identity.fingerprint());
+        assert_eq!(
+            identity.fingerprint().replace(' ', "").to_lowercase(),
+            identity.peer_id(),
+            "one device has one digest: the labels differ in spelling, not in value"
+        );
     }
 
     #[test]

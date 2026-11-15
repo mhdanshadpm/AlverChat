@@ -18,6 +18,9 @@ use tauri_plugin_opener::OpenerExt;
 
 pub const SETTINGS_FILE: &str = "settings.json";
 pub const PASSPHRASE_ACCOUNT: &str = "lan-passphrase";
+/// The shortest backup passphrase [`create_backup`] accepts; `settings_surface_tests` checks the
+/// number the Settings placeholder prints against this one.
+pub const BACKUP_PASSPHRASE_MIN_LEN: usize = 8;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
@@ -130,6 +133,20 @@ pub fn default_hotkey() -> String {
     "Ctrl+Alt+S".into()
 }
 
+/// The two toggle rows the tray menu shows, built from the settings the notification
+/// path reads. Callers must refresh the tray whenever either flag changes — Settings
+/// writes them directly, so a stale label would promise the opposite of what happens.
+pub fn tray_toggle_titles(settings: &AppSettings) -> (String, String) {
+    let word = |value: bool| if value { "On" } else { "Off" };
+    (
+        format!(
+            "Mute all notifications: {}",
+            word(settings.notifications_muted)
+        ),
+        format!("Do Not Disturb: {}", word(settings.dnd_enabled)),
+    )
+}
+
 pub struct SettingsState(pub Arc<Mutex<AppSettings>>);
 
 impl SettingsState {
@@ -209,12 +226,19 @@ fn day_abbrev(raw: &str) -> String {
     }
 }
 
+/// True when the whole device is quiet, which is what the floating icon shows as its
+/// Do-Not-Disturb state. A per-chat mute is deliberately absent: it silences one thread,
+/// not the icon. `should_notify` below reads the same rule, so the ring and the alert
+/// cannot disagree.
+#[must_use]
+pub fn icon_is_quiet(settings: &AppSettings, now_ms: u64) -> bool {
+    settings.notifications_muted || dnd_window_active(settings, now_ms)
+}
+
 /// A chat stays quiet when the app is muted, muted per chat, or inside the
 /// scheduled quiet window.
 pub fn should_notify(settings: &AppSettings, chat_id: &str, now_ms: u64) -> bool {
-    !settings.notifications_muted
-        && !dnd_window_active(settings, now_ms)
-        && !settings.muted_chats.iter().any(|id| id == chat_id)
+    !icon_is_quiet(settings, now_ms) && !settings.muted_chats.iter().any(|id| id == chat_id)
 }
 
 fn parse_hotkey(combo: &str) -> Result<Shortcut, String> {
@@ -273,14 +297,12 @@ pub fn register_hotkey(app: &AppHandle, combo: &str) -> Result<String, String> {
 
 fn toggle_dock(app: &AppHandle) {
     if let Some(dock) = app.get_webview_window("dock") {
-        let visible = dock.is_visible().unwrap_or(false);
-        if visible {
+        if dock.is_visible().unwrap_or(false) {
             let _ = dock.hide();
         } else {
             let _ = dock.show();
             let _ = dock.set_always_on_top(true);
         }
-        let _ = app.emit("dock-visibility", !visible);
     }
 }
 
@@ -294,6 +316,14 @@ pub fn apply_autostart(app: &AppHandle, enabled: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// A toast on Windows is branded by the `AppUserModelID` of the installed shortcut, not by
+/// the strings we pass, so a message toast reads as a stock Windows notification. The dock
+/// bubble is AlverChat's own alert surface, so it takes over whenever it can actually show
+/// the message.
+fn message_alert_uses_dock(is_windows: bool, bubbles_enabled: bool, dock_visible: bool) -> bool {
+    is_windows && bubbles_enabled && dock_visible
+}
+
 pub fn notify_message(app: &AppHandle, title: &str, body: &str) {
     let settings = app.state::<SettingsState>().snapshot();
     let preview = if settings.show_message_preview {
@@ -301,9 +331,23 @@ pub fn notify_message(app: &AppHandle, title: &str, body: &str) {
     } else {
         "New message"
     };
+    let dock = app.get_webview_window("dock");
+    let dock_visible = dock
+        .as_ref()
+        .and_then(|dock| dock.is_visible().ok())
+        .unwrap_or(false);
+    if message_alert_uses_dock(cfg!(windows), settings.bubbles_enabled, dock_visible) {
+        // The payload is the sound flag: the bubble itself already comes from `overlay-state`.
+        if let Some(dock) = dock {
+            let _ = dock.emit("message-alert", settings.notification_sound);
+        }
+        return;
+    }
     let mut builder = app.notification().builder().title(title).body(preview);
     if settings.notification_sound {
-        builder = builder.sound("default");
+        // notify-rust matches the Windows sound name case-sensitively, and an unparseable
+        // name becomes `<audio silent="true">` instead of the default notification sound.
+        builder = builder.sound(if cfg!(windows) { "Default" } else { "default" });
     }
     let _ = builder.show();
 }
@@ -343,11 +387,11 @@ fn deep_link(kind: &str) -> String {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn deep_link(kind: &str) -> String {
-    match kind {
-        "notifications" => "x-apple-system-preferences://".into(),
-        _ => "https://localhost/".into(),
-    }
+fn deep_link(_kind: &str) -> String {
+    // Linux has no portable settings URL scheme; the desktop environment decides.
+    // An empty link tells `open_permission_settings` to explain that instead of
+    // opening an unrelated page in the browser.
+    String::new()
 }
 
 #[cfg(target_os = "macos")]
@@ -424,9 +468,24 @@ pub fn update_settings(app: AppHandle, patch: Value) -> Result<AppSettings, Stri
     if current.launch_at_login != previous.launch_at_login {
         let _ = apply_autostart(&app, current.launch_at_login);
     }
-    if current.display_name != previous.display_name {
+    if current.notifications_muted != previous.notifications_muted
+        || current.dnd_enabled != previous.dnd_enabled
+    {
+        crate::refresh_tray(&app);
+    }
+    if current.screen_corner != previous.screen_corner {
+        let _ = crate::apply_screen_corner(&app, &current.screen_corner);
+    }
+    if current.display_name != previous.display_name
+        || current.visible_on_network != previous.visible_on_network
+        || current.network_adapter != previous.network_adapter
+    {
         crate::republish_lan_beacon(&app);
     }
+    // The overlays only see settings through the snapshot, and nothing else emits here,
+    // so a settings write has to repaint them or the change waits for unrelated traffic.
+    crate::refresh_overlay_quiet(&app);
+    crate::publish(&app);
     Ok(current)
 }
 
@@ -531,6 +590,12 @@ pub fn permission_status(kind: String) -> PermissionStatus {
 #[tauri::command]
 pub fn open_permission_settings(app: AppHandle, kind: String) -> Result<(), String> {
     let status = permission_status(kind);
+    if status.deep_link.is_empty() {
+        return Err(
+            "This platform has no settings deep link; open your desktop's privacy settings manually."
+                .into(),
+        );
+    }
     app.opener()
         .open_url(&status.deep_link, None::<String>)
         .map_err(|error| format!("Cannot open the system settings: {error}"))
@@ -554,6 +619,10 @@ pub struct ConnectionReport {
     pub online_peers: usize,
     pub adapters: Vec<String>,
     pub discovery_port: u16,
+    /// Whether the signed broadcast that carries this machine's beacon without mDNS is
+    /// open right now. The port number alone would not say: a second instance on the same
+    /// host cannot bind it, and then only mDNS is working.
+    pub discovery_active: bool,
     pub warnings: Vec<String>,
 }
 
@@ -570,6 +639,14 @@ pub fn run_connection_test(app: AppHandle) -> ConnectionReport {
         .lock()
         .map(|_| crate::listener_port())
         .unwrap_or(0);
+    let discovery_active = app
+        .try_state::<crate::DiscoveryState>()
+        .map(|discovery| {
+            discovery
+                .udp_open
+                .load(std::sync::atomic::Ordering::Acquire)
+        })
+        .unwrap_or(false);
     let adapters = local_ipv4_addresses();
     let mut warnings = Vec::new();
     if port == 0 {
@@ -584,6 +661,11 @@ pub fn run_connection_test(app: AppHandle) -> ConnectionReport {
     if adapters.is_empty() {
         warnings.push("No local network adapter with a private address was found.".into());
     }
+    if !discovery_active {
+        warnings.push(
+            "The UDP discovery fallback is not listening, so peers are found by mDNS alone.".into(),
+        );
+    }
     ConnectionReport {
         listening: port != 0,
         port,
@@ -591,20 +673,126 @@ pub fn run_connection_test(app: AppHandle) -> ConnectionReport {
         online_peers: peers.iter().filter(|peer| peer.online).count(),
         adapters,
         discovery_port: alver_core::discovery::DISCOVERY_PORT,
+        discovery_active,
         warnings,
     }
 }
 
-pub fn local_ipv4_addresses() -> Vec<String> {
+fn local_interfaces() -> Vec<if_addrs::Interface> {
     if_addrs::get_if_addrs()
-        .map(|interfaces| {
-            interfaces
-                .iter()
-                .filter(|interface| interface.ip().is_ipv4() && !interface.is_loopback())
-                .map(|interface| format!("{} ({})", interface.ip(), interface.name))
-                .collect()
-        })
         .unwrap_or_default()
+        .into_iter()
+        .filter(|interface| interface.ip().is_ipv4() && !interface.is_loopback())
+        .collect()
+}
+
+pub fn local_ipv4_addresses() -> Vec<String> {
+    local_interfaces()
+        .iter()
+        .map(|interface| format!("{} ({})", interface.ip(), interface.name))
+        .collect()
+}
+
+/// The same adapters as addresses, for the code that has to advertise one of them.
+pub fn local_ipv4s() -> Vec<std::net::IpAddr> {
+    local_interfaces()
+        .iter()
+        .map(|interface| interface.ip())
+        .collect()
+}
+
+/// Settings → Network adapter, resolved against the adapters this host has right now.
+/// `None` means advertise everywhere, which is what "Automatic" means and what a saved
+/// address that no longer exists means too: a machine that switched Wi-Fi must not go
+/// invisible because it is looking for an interface it left behind.
+pub fn adapter_choice(choice: &str, available: &[std::net::IpAddr]) -> Option<std::net::IpAddr> {
+    let trimmed = choice.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto") {
+        return None;
+    }
+    // The picker stores the report's label, "192.168.1.10 (en0)"; accept either order.
+    let head = trimmed.split([' ', '(']).next().unwrap_or(trimmed);
+    let tail = trimmed
+        .trim_end_matches(')')
+        .rsplit('(')
+        .next()
+        .unwrap_or("");
+    for token in [head, tail] {
+        if let Ok(address) = token.parse::<std::net::IpAddr>() {
+            return available.contains(&address).then_some(address);
+        }
+    }
+    None
+}
+
+/// The adapters the discovery fallback can broadcast from: each IPv4 interface's own
+/// address and the subnet broadcast the system reports for it, when it reports one.
+pub fn local_ipv4_beacons() -> Vec<(std::net::Ipv4Addr, Option<std::net::Ipv4Addr>)> {
+    local_interfaces()
+        .iter()
+        .filter_map(|interface| match &interface.addr {
+            if_addrs::IfAddr::V4(address) => Some((address.ip, address.broadcast)),
+            if_addrs::IfAddr::V6(_) => None,
+        })
+        .collect()
+}
+
+/// Where the UDP discovery fallback sends this machine's beacon, and with which address
+/// written into the signed payload.
+///
+/// A datagram aimed at `255.255.255.255` leaves only through the default route, so each
+/// subnet's own broadcast address is used where the interface reports one, and an interface
+/// that reports none still gets the limited address instead of being skipped. The host in
+/// the beacon is the interface's own address, because a peer that cannot run mDNS is exactly
+/// the peer that has no way to turn a `.local.` name into a route.
+///
+/// Settings → Network adapter narrows the list to the one interface it names. A saved
+/// address this machine no longer holds means "automatic" rather than silence — the same
+/// rule [`adapter_choice`] applies to the announcement — so a laptop that left the office
+/// keeps announcing at home.
+pub fn discovery_targets(
+    adapters: &[(std::net::Ipv4Addr, Option<std::net::Ipv4Addr>)],
+    choice: &str,
+    port: u16,
+) -> Vec<(std::net::IpAddr, std::net::SocketAddr)> {
+    let addresses: Vec<std::net::IpAddr> = adapters
+        .iter()
+        .map(|(address, _)| std::net::IpAddr::V4(*address))
+        .collect();
+    let chosen = adapter_choice(choice, &addresses);
+    let mut seen = std::collections::HashSet::new();
+    adapters
+        .iter()
+        .filter(|(address, _)| chosen.is_none_or(|picked| picked == std::net::IpAddr::V4(*address)))
+        .filter_map(|(address, broadcast)| {
+            let destination = std::net::SocketAddr::from((
+                broadcast.unwrap_or(std::net::Ipv4Addr::BROADCAST),
+                port,
+            ));
+            seen.insert(destination)
+                .then_some((std::net::IpAddr::V4(*address), destination))
+        })
+        .collect()
+}
+
+/// Settings → "Who sees my status". Only an explicit "nobody" hides anything: a blank
+/// value, or one written by an older build, keeps the default of letting peers see it.
+pub fn status_is_private(who_sees_status: &str) -> bool {
+    who_sees_status.trim().eq_ignore_ascii_case("nobody")
+}
+
+/// The profile's presence label, reduced to the token the presence dots are drawn from.
+/// The wire carries the token rather than the label so a translated profile cannot change
+/// how a peer is drawn, and an unrecognized label reads as available.
+pub fn presence_token(presence: &str) -> &'static str {
+    let value = presence.trim().to_ascii_lowercase();
+    if value.contains("meeting") || value.contains("busy") || value.contains("dnd") {
+        "busy"
+    } else if value.contains("away") {
+        "away"
+    } else {
+        "online"
+    }
 }
 
 #[derive(Serialize)]
@@ -621,17 +809,45 @@ fn backup_directory(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(directory)
 }
 
+/// Secrets an archive carries beside the database, as `(bundle field, secret account)`.
+///
+/// A copy of `messages.db` without its key is a box nobody can open: on another device the
+/// restore would write a file that build cannot read. The container is sealed with the user's
+/// backup passphrase, so the profile can travel whole — and a restore moves into a new body
+/// with the same fingerprint, which is what keeps the peers that pinned it.
+const BUNDLED_SECRETS: [(&str, &str); 3] = [
+    ("databaseKeyBase64", crate::secrets::DATABASE_KEY),
+    ("identityKeyBase64", crate::secrets::IDENTITY_KEY),
+    ("lanPassphraseBase64", PASSPHRASE_ACCOUNT),
+];
+
 fn bundle_plaintext(app: &AppHandle) -> Result<Vec<u8>, String> {
-    let data_dir = crate::instance_data_dir(app)?;
-    let settings = app.state::<SettingsState>().snapshot();
-    let database = data_dir.join("messages.db");
+    let database = crate::instance_data_dir(app)?.join("messages.db");
     let database_bytes = std::fs::read(&database).unwrap_or_default();
-    let payload = serde_json::json!({
-        "version": 1,
+    let secrets = crate::secrets::Secrets::open(app)?;
+    let settings = app.state::<SettingsState>().snapshot();
+    bundle_payload(&settings, database_bytes, &secrets)
+}
+
+/// The archive body: settings, the raw database, and the keys that make that database readable.
+fn bundle_payload(
+    settings: &AppSettings,
+    database_bytes: Vec<u8>,
+    secrets: &crate::secrets::Secrets,
+) -> Result<Vec<u8>, String> {
+    let mut payload = serde_json::json!({
+        "version": 2,
         "app": alver_core::APP_NAME,
         "settings": settings,
         "databaseBase64": base64_bytes(&database_bytes),
     });
+    if let Some(object) = payload.as_object_mut() {
+        for (field, account) in BUNDLED_SECRETS {
+            if let Some(secret) = secrets.get(account)? {
+                object.insert((*field).into(), Value::String(base64_bytes(&secret)));
+            }
+        }
+    }
     serde_json::to_vec(&payload).map_err(|error| error.to_string())
 }
 
@@ -702,8 +918,11 @@ fn alver_index(byte: u8) -> Option<u8> {
 
 #[tauri::command]
 pub fn create_backup(app: AppHandle, passphrase: String) -> Result<BackupResult, String> {
-    if passphrase.len() < 8 {
-        return Err("Use a backup passphrase of at least 8 characters.".into());
+    if passphrase.len() < BACKUP_PASSPHRASE_MIN_LEN {
+        return Err(format!(
+            "Use a backup passphrase of at least {} characters.",
+            BACKUP_PASSPHRASE_MIN_LEN
+        ));
     }
     let plaintext = bundle_plaintext(&app)?;
     let bundle = alver_core::crypto::encrypt_backup(&passphrase, &plaintext)?;
@@ -753,6 +972,65 @@ pub fn list_backups(app: AppHandle) -> Result<Vec<BackupResult>, String> {
     Ok(items)
 }
 
+/// Writes an archive into a profile and proves the result opens, putting the profile back the
+/// way it was if it does not. `verify` reopens the store the way startup does, which is the only
+/// check that the keys inside an archive really belong to the database inside it.
+fn install_payload(
+    plaintext: &[u8],
+    database: &Path,
+    secrets: &crate::secrets::Secrets,
+    verify: &dyn Fn() -> Result<(), String>,
+) -> Result<AppSettings, String> {
+    let value: serde_json::Value =
+        serde_json::from_slice(plaintext).map_err(|error| error.to_string())?;
+    let settings_value = value
+        .get("settings")
+        .cloned()
+        .ok_or_else(|| "The backup has no settings.".to_string())?;
+    let restored: AppSettings =
+        serde_json::from_value(settings_value).map_err(|error| error.to_string())?;
+    let previous_database = std::fs::read(database).unwrap_or_default();
+    let previous_secrets = BUNDLED_SECRETS
+        .iter()
+        .map(|(_, account)| secrets.get(account).map(|secret| (*account, secret)))
+        .collect::<Result<Vec<_>, String>>()?;
+    for (field, account) in BUNDLED_SECRETS {
+        // An archive made before keys travelled with a backup keeps this device's own keys; the
+        // store open below is what catches a database they cannot read.
+        if let Some(encoded) = value.get(field).and_then(|value| value.as_str()) {
+            secrets.set(account, &unbase64_bytes(encoded)?)?;
+        }
+    }
+    if let Some(encoded) = value.get("databaseBase64").and_then(|v| v.as_str()) {
+        let bytes = unbase64_bytes(encoded)?;
+        if !bytes.is_empty() {
+            std::fs::write(database, bytes).map_err(|error| error.to_string())?;
+        }
+    }
+    // Restoring is the one place a wrong key turns into a profile that will not start.
+    if let Err(error) = verify() {
+        if previous_database.is_empty() {
+            let _ = std::fs::remove_file(database);
+        } else {
+            let _ = std::fs::write(database, &previous_database);
+        }
+        for (account, secret) in &previous_secrets {
+            match secret {
+                Some(secret) => {
+                    let _ = secrets.set(account, secret);
+                }
+                None => {
+                    let _ = secrets.delete(account);
+                }
+            }
+        }
+        return Err(format!(
+            "That backup's database does not open with the keys inside it, so nothing changed: {error}"
+        ));
+    }
+    Ok(restored)
+}
+
 #[tauri::command]
 pub fn restore_backup(app: AppHandle, path: String, passphrase: String) -> Result<(), String> {
     let candidate = Path::new(&path);
@@ -762,21 +1040,12 @@ pub fn restore_backup(app: AppHandle, path: String, passphrase: String) -> Resul
     }
     let bundle = std::fs::read(candidate).map_err(|error| error.to_string())?;
     let plaintext = alver_core::crypto::decrypt_backup(&passphrase, &bundle)?;
-    let value: serde_json::Value =
-        serde_json::from_slice(&plaintext).map_err(|error| error.to_string())?;
-    let settings_value = value
-        .get("settings")
-        .cloned()
-        .ok_or_else(|| "The backup has no settings.".to_string())?;
-    let restored: AppSettings =
-        serde_json::from_value(settings_value).map_err(|error| error.to_string())?;
-    if let Some(encoded) = value.get("databaseBase64").and_then(|v| v.as_str()) {
-        let bytes = unbase64_bytes(encoded)?;
-        if !bytes.is_empty() {
-            let database = crate::instance_data_dir(&app)?.join("messages.db");
-            std::fs::write(&database, bytes).map_err(|error| error.to_string())?;
-        }
-    }
+    let database = crate::instance_data_dir(&app)?.join("messages.db");
+    let secrets = crate::secrets::Secrets::open(&app)?;
+    let restored = install_payload(&plaintext, &database, &secrets, &|| {
+        crate::open_message_store(&app).map(|_| ())
+    })?;
+    crate::forget_lan_passphrase(&app);
     let state = app.state::<SettingsState>();
     {
         let mut guard = state
@@ -908,6 +1177,110 @@ mod tests {
     }
 
     #[test]
+    fn the_adapter_choice_falls_back_to_every_interface() {
+        let available: Vec<std::net::IpAddr> = ["192.168.1.10", "10.0.0.4"]
+            .iter()
+            .map(|text| text.parse().unwrap())
+            .collect();
+        assert_eq!(adapter_choice("auto", &available), None);
+        assert_eq!(adapter_choice("", &available), None);
+        assert_eq!(adapter_choice("not-an-address", &available), None);
+        // A saved choice from a network this machine left must not hide it.
+        assert_eq!(adapter_choice("192.168.9.9 (en0)", &available), None);
+    }
+
+    #[test]
+    fn the_adapter_choice_reads_the_label_the_connection_test_writes() {
+        let available: Vec<std::net::IpAddr> = ["192.168.1.10", "10.0.0.4"]
+            .iter()
+            .map(|text| text.parse().unwrap())
+            .collect();
+        let en0: std::net::IpAddr = "192.168.1.10".parse().unwrap();
+        assert_eq!(adapter_choice("192.168.1.10 (en0)", &available), Some(en0));
+        assert_eq!(adapter_choice("en0 (192.168.1.10)", &available), Some(en0));
+        assert_eq!(adapter_choice("192.168.1.10", &available), Some(en0));
+    }
+
+    fn v4(text: &str) -> std::net::Ipv4Addr {
+        text.parse().expect("an IPv4 address")
+    }
+
+    #[test]
+    fn each_adapter_broadcasts_to_its_own_subnet_with_its_own_address() {
+        let adapters = [(v4("192.168.1.10"), Some(v4("192.168.1.255")))];
+        assert_eq!(
+            discovery_targets(&adapters, "auto", 47_986),
+            vec![(
+                std::net::IpAddr::V4(v4("192.168.1.10")),
+                std::net::SocketAddr::from((v4("192.168.1.255"), 47_986))
+            )]
+        );
+    }
+
+    #[test]
+    fn an_interface_with_no_reported_broadcast_still_announces() {
+        let adapters = [(v4("10.0.0.4"), None)];
+        assert_eq!(
+            discovery_targets(&adapters, "auto", 47_986),
+            vec![(
+                std::net::IpAddr::V4(v4("10.0.0.4")),
+                std::net::SocketAddr::from((v4("255.255.255.255"), 47_986))
+            )]
+        );
+    }
+
+    #[test]
+    fn a_named_adapter_narrows_the_broadcast_to_itself() {
+        let adapters = [
+            (v4("192.168.1.10"), Some(v4("192.168.1.255"))),
+            (v4("10.0.0.4"), Some(v4("10.0.0.255"))),
+        ];
+        assert_eq!(
+            discovery_targets(&adapters, "10.0.0.4 (en5)", 47_986),
+            vec![(
+                std::net::IpAddr::V4(v4("10.0.0.4")),
+                std::net::SocketAddr::from((v4("10.0.0.255"), 47_986))
+            )]
+        );
+        // Both adapters on one subnet would answer the same broadcast twice.
+        assert_eq!(
+            discovery_targets(
+                &[
+                    (v4("192.168.1.10"), Some(v4("192.168.1.255"))),
+                    (v4("192.168.1.11"), Some(v4("192.168.1.255"))),
+                ],
+                "auto",
+                47_986
+            )
+            .len(),
+            1
+        );
+        // A saved choice from a network this machine left keeps it announcing anyway.
+        assert_eq!(
+            discovery_targets(&adapters, "172.16.0.9 (en0)", 47_986).len(),
+            2
+        );
+        assert!(discovery_targets(&[], "auto", 47_986).is_empty());
+    }
+
+    #[test]
+    fn only_an_explicit_nobody_hides_the_status() {
+        assert!(status_is_private("nobody"));
+        assert!(status_is_private(" Nobody "));
+        assert!(!status_is_private("everyone"));
+        assert!(!status_is_private(""));
+    }
+
+    #[test]
+    fn presence_labels_reduce_to_the_dot_states() {
+        assert_eq!(presence_token("Available"), "online");
+        assert_eq!(presence_token("Away"), "away");
+        assert_eq!(presence_token("Busy"), "busy");
+        assert_eq!(presence_token("In a meeting"), "busy");
+        assert_eq!(presence_token(""), "online");
+    }
+
+    #[test]
     fn partial_update_keeps_the_other_settings() {
         let current = AppSettings {
             display_name: "Anu".into(),
@@ -918,6 +1291,14 @@ mod tests {
         assert_eq!(merged.theme, "light");
         assert_eq!(merged.display_name, "Anu");
         assert!(merge_settings(&current, &serde_json::json!({"opacityPercent": 500})).is_err());
+    }
+
+    #[test]
+    fn windows_message_alerts_go_to_the_dock_bubble() {
+        assert!(message_alert_uses_dock(true, true, true));
+        assert!(!message_alert_uses_dock(true, false, true));
+        assert!(!message_alert_uses_dock(true, true, false));
+        assert!(!message_alert_uses_dock(false, true, true));
     }
 
     #[test]
@@ -974,11 +1355,96 @@ mod tests {
     }
 
     #[test]
+    fn the_icon_is_quiet_exactly_when_alerts_stop() {
+        // The dock's Do-Not-Disturb ring is built from `icon_is_quiet`, so it must agree
+        // with the rule that actually suppresses the alert — otherwise the icon promises
+        // quiet while a message still chimes, or the reverse.
+        let night = Local
+            .with_ymd_and_hms(2024, 1, 3, 23, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp_millis() as u64;
+        let midday = Local
+            .with_ymd_and_hms(2024, 1, 3, 12, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp_millis() as u64;
+        let dnd = AppSettings::default();
+        assert!(icon_is_quiet(&dnd, night));
+        assert!(!icon_is_quiet(&dnd, midday));
+        let muted = AppSettings {
+            notifications_muted: true,
+            dnd_enabled: false,
+            ..Default::default()
+        };
+        assert!(icon_is_quiet(&muted, midday));
+        for (settings, at) in [(&dnd, night), (&dnd, midday), (&muted, midday)] {
+            assert_eq!(
+                should_notify(settings, "peer-1", at),
+                !icon_is_quiet(settings, at)
+            );
+        }
+        // A single muted thread keeps the icon loud: the device is not quiet.
+        let one_chat = AppSettings {
+            dnd_enabled: false,
+            muted_chats: vec!["peer-1".into()],
+            ..Default::default()
+        };
+        assert!(!icon_is_quiet(&one_chat, midday));
+        assert!(!should_notify(&one_chat, "peer-1", midday));
+        assert!(should_notify(&one_chat, "peer-2", midday));
+    }
+
+    #[test]
     fn hotkey_strings_become_shortcuts() {
         assert!(parse_hotkey("Ctrl+Alt+S").is_ok());
         assert!(parse_hotkey("Command+Alt+S").is_ok());
         assert!(parse_hotkey("Ctrl+Alt").is_err());
         assert!(parse_hotkey("").is_err());
+    }
+
+    #[test]
+    fn the_default_hotkey_can_always_be_registered() {
+        // A default that fails to parse would put the app into the fall-back loop at
+        // startup, so the shipped combo has to survive the same parser the recorder uses.
+        assert!(parse_hotkey(&default_hotkey()).is_ok());
+        assert!(parse_hotkey(&AppSettings::default().hotkey).is_ok());
+    }
+
+    #[test]
+    fn tray_toggle_labels_match_what_notifications_do() {
+        let muted = AppSettings {
+            notifications_muted: true,
+            dnd_enabled: false,
+            ..Default::default()
+        };
+        assert_eq!(
+            tray_toggle_titles(&muted),
+            (
+                "Mute all notifications: On".into(),
+                "Do Not Disturb: Off".into(),
+            )
+        );
+        assert!(!should_notify(&muted, "peer-1", 0));
+
+        let audible = AppSettings {
+            notifications_muted: false,
+            ..muted
+        };
+        assert_eq!(
+            tray_toggle_titles(&audible).0,
+            "Mute all notifications: Off"
+        );
+        assert!(should_notify(&audible, "peer-1", 0));
+
+        // The Settings screen writes one-flag patches, and the tray label has to follow
+        // the patched value rather than the stored one it was built from.
+        let patched = merge_settings(
+            &AppSettings::default(),
+            &serde_json::json!({ "notificationsMuted": true }),
+        )
+        .unwrap();
+        assert_eq!(tray_toggle_titles(&patched).0, "Mute all notifications: On");
     }
 
     #[test]
@@ -1005,5 +1471,142 @@ mod tests {
         assert_eq!(decoded.theme, "dark");
         assert_eq!(decoded.opacity_percent, 90);
         assert!(decoded.bubbles_enabled);
+    }
+
+    /// A profile directory with its own keys and one database written with them.
+    fn profile_with_keys(root: &Path, key: &[u8; 32], body: &str) -> crate::secrets::Secrets {
+        std::fs::create_dir_all(root).unwrap();
+        let secrets = crate::secrets::Secrets::files(root.to_path_buf());
+        secrets.set(crate::secrets::DATABASE_KEY, key).unwrap();
+        secrets
+            .set(crate::secrets::IDENTITY_KEY, &[key[0]; 32])
+            .unwrap();
+        secrets.set(PASSPHRASE_ACCOUNT, b"lan-passphrase").unwrap();
+        let database = root.join("messages.db");
+        let mut store = alver_core::storage::Store::open(database.to_str().unwrap(), key).unwrap();
+        store
+            .save_message(&alver_core::Message {
+                id: uuid::Uuid::now_v7(),
+                chat_id: "chat-restore".into(),
+                sender: "local".into(),
+                body: body.into(),
+                clock: alver_core::Hlc {
+                    physical_ms: 99,
+                    logical: 1,
+                },
+                tombstone: false,
+                forwarded: false,
+            })
+            .unwrap();
+        drop(store);
+        secrets
+    }
+
+    fn archived_bundle(secrets: &crate::secrets::Secrets, root: &Path) -> Vec<u8> {
+        bundle_payload(
+            &AppSettings {
+                display_name: "Anu".into(),
+                theme: "dark".into(),
+                ..Default::default()
+            },
+            std::fs::read(root.join("messages.db")).unwrap(),
+            secrets,
+        )
+        .unwrap()
+    }
+
+    fn chat_bodies(database: &Path, key: &[u8; 32]) -> Vec<String> {
+        let store = alver_core::storage::Store::open(database.to_str().unwrap(), key).unwrap();
+        let bodies = store
+            .messages_for_chat("chat-restore")
+            .unwrap()
+            .into_iter()
+            .map(|message| message.body)
+            .collect();
+        drop(store);
+        bodies
+    }
+
+    #[test]
+    fn a_key_carrying_backup_restores_into_another_profile() {
+        let root = std::env::temp_dir().join(format!("alverchat-restore-{}", uuid::Uuid::now_v7()));
+        let source = root.join("source");
+        let target = root.join("target");
+        let source_key = [3u8; 32];
+        let target_key = [9u8; 32];
+
+        let source_secrets = profile_with_keys(&source, &source_key, "The invoice is ready.");
+        let plaintext = archived_bundle(&source_secrets, &source);
+
+        // A second device that never saw these keys, with a chat of its own.
+        let target_secrets = profile_with_keys(&target, &target_key, "Something else entirely.");
+        let target_database = target.join("messages.db");
+        let verify = || match target_secrets.get(crate::secrets::DATABASE_KEY) {
+            Ok(Some(secret)) => {
+                let Ok(key) = <[u8; 32]>::try_from(secret) else {
+                    return Err("the database key is not 32 bytes".to_string());
+                };
+                alver_core::storage::Store::open(target_database.to_str().unwrap(), &key)
+                    .map(|_| ())
+            }
+            Ok(None) => Err("this profile has no database key".to_string()),
+            Err(error) => Err(error),
+        };
+
+        let restored =
+            install_payload(&plaintext, &target_database, &target_secrets, &verify).unwrap();
+        assert_eq!(restored.display_name, "Anu");
+        assert_eq!(restored.theme, "dark");
+
+        // The archive's key replaced the local one, which is what makes its database readable.
+        assert_eq!(
+            target_secrets
+                .get(crate::secrets::DATABASE_KEY)
+                .unwrap()
+                .as_deref(),
+            Some(source_key.as_slice())
+        );
+        assert_eq!(
+            target_secrets.get(PASSPHRASE_ACCOUNT).unwrap().as_deref(),
+            Some(b"lan-passphrase".as_slice())
+        );
+        assert_eq!(
+            chat_bodies(&target_database, &source_key),
+            ["The invoice is ready."]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_restore_that_cannot_open_its_database_changes_nothing() {
+        let root =
+            std::env::temp_dir().join(format!("alverchat-rollback-{}", uuid::Uuid::now_v7()));
+        let source = root.join("source");
+        let target = root.join("target");
+        let target_key = [9u8; 32];
+
+        let source_secrets = profile_with_keys(&source, &[3u8; 32], "Archived chat.");
+        let plaintext = archived_bundle(&source_secrets, &source);
+        let target_secrets = profile_with_keys(&target, &target_key, "Keep me.");
+        let target_database = target.join("messages.db");
+        let before = std::fs::read(&target_database).unwrap();
+
+        // A store that will not open is what a key that does not match the database does.
+        let error = install_payload(&plaintext, &target_database, &target_secrets, &|| {
+            Err("file is not a database".to_string())
+        })
+        .unwrap_err();
+        assert!(error.contains("nothing changed"), "{error}");
+
+        assert_eq!(std::fs::read(&target_database).unwrap(), before);
+        assert_eq!(
+            target_secrets
+                .get(crate::secrets::DATABASE_KEY)
+                .unwrap()
+                .as_deref(),
+            Some(target_key.as_slice())
+        );
+        assert_eq!(chat_bodies(&target_database, &target_key), ["Keep me."]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

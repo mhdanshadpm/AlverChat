@@ -12,11 +12,13 @@ import {
   type IconName,
   type ToastView,
 } from '../components';
-import { ns } from '../i18n';
+import { ns, registerNamespace } from '../i18n';
+import systemCatalog from '../i18n/en/system';
 import type { ConnectionReport } from '../../../bridge/src';
 import { ScreenHeader, type ScreenProps } from './shared';
 import './SystemStates.css';
 
+registerNamespace('system', systemCatalog);
 const text = ns('system');
 
 /* ==================================================================== *
@@ -229,7 +231,7 @@ function cardCopy(
     case 'no-network':
       return {
         title: text('connNoNetwork', 'No network'),
-        text: text('connNoNetworkBody', "You're not connected to a network."),
+        text: text('connNoNetworkBody', 'You’re not connected to a network.'),
         detail: text('connNoNetworkDetail', 'Connect to your office or local network (LAN) to find and chat with others.'),
         action: onRunTest => (
           <Button onClick={onRunTest} size="sm" variant="secondary">
@@ -240,7 +242,7 @@ function cardCopy(
     case 'connected':
       return {
         title: text('connConnected', 'Connected to {{total}} peers', { total: online }),
-        text: text('connConnectedBody', "You're connected to your LAN."),
+        text: text('connConnectedBody', 'You’re connected to your LAN.'),
         detail: text('connConnectedDetail', '{{total}} people are available on your network.', { total: online }),
         action: () => (
           <Badge tone="success">
@@ -539,7 +541,7 @@ function demoToasts(): ToastView[] {
     {
       id: 'demo-failed',
       title: text('toastFailed', 'Message failed to send'),
-      message: text('toastFailedBody', "Couldn't reach the recipient."),
+      message: text('toastFailedBody', 'Couldn’t reach the recipient.'),
       tone: 'danger',
       icon: 'alertCircle',
       action: { label: text('toastRetry', 'Retry'), onClick: () => {} },
@@ -655,7 +657,11 @@ export function SystemStates({ bridge, toast }: ScreenProps) {
           <ListRow
             icon="zap"
             title={text('rowDiscovery', 'Discovery port')}
-            hint={String(report?.discoveryPort ?? 0)}
+            hint={
+              report?.discoveryActive
+                ? text('rowDiscoveryLive', 'UDP {{port}} listening', { port: report?.discoveryPort ?? 0 })
+                : text('rowDiscoveryIdle', 'UDP {{port}} not listening', { port: report?.discoveryPort ?? 0 })
+            }
           />
           <ListRow
             icon="alertCircle"

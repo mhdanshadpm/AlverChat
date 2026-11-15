@@ -1,6 +1,9 @@
 /* OnboardingScreen catalog — the 5 first-run steps, per-OS permission cards and
    the firewall guide. Flat keys only (i18next splits on '.'). */
 export default {
+  /* The setup window's accessible name and the rail's progress label. */
+  setupTitle: 'AlverChat setup',
+  setupProgress: 'Setup progress',
   back: 'Back',
   benefitLan: 'LAN discovery',
   benefitLocal: 'Local data storage',

@@ -83,6 +83,26 @@ pub fn snap_icon_to_edge(
     (x, y, edge)
 }
 
+/// The placement a Settings "Screen corner / side" value asks for: which edge the icon
+/// snaps to and how far down the work area it sits (0 top, 0.5 center, 1 bottom).
+/// An unrecognised value yields `None`, so a hand-edited preference cannot push the icon
+/// off screen.
+pub fn corner_position(corner: &str) -> Option<(Edge, f64)> {
+    let (side, position) = corner.split_once('-')?;
+    let edge = match side {
+        "left" => Edge::Left,
+        "right" => Edge::Right,
+        _ => return None,
+    };
+    let percent = match position {
+        "top" => 0.0,
+        "center" => 0.5,
+        "bottom" => 1.0,
+        _ => return None,
+    };
+    Some((edge, percent))
+}
+
 pub fn vertical_percent(icon_top: i32, area: Rect, icon_size: i32) -> f64 {
     let travel = (area.height - icon_size).max(1);
     ((icon_top - area.y) as f64 / travel as f64).clamp(0.0, 1.0)
@@ -145,6 +165,36 @@ mod tests {
     fn bubble_side_follows_icon_edge() {
         assert_eq!(edge_for_icon(0, 56, AREA), Edge::Left);
         assert_eq!(edge_for_icon(1864, 56, AREA), Edge::Right);
+    }
+    #[test]
+    fn every_corner_the_settings_picker_offers_is_placeable() {
+        for (corner, expected) in [
+            ("left-top", (Edge::Left, 0.0)),
+            ("left-center", (Edge::Left, 0.5)),
+            ("left-bottom", (Edge::Left, 1.0)),
+            ("right-top", (Edge::Right, 0.0)),
+            ("right-center", (Edge::Right, 0.5)),
+            ("right-bottom", (Edge::Right, 1.0)),
+        ] {
+            assert_eq!(corner_position(corner), Some(expected), "{corner}");
+        }
+        assert_eq!(corner_position(""), None);
+        assert_eq!(corner_position("top-left"), None);
+        assert_eq!(corner_position("right-middle"), None);
+
+        // The percentages land on the rows the names promise.
+        assert_eq!(
+            restore_icon_top(corner_position("right-top").unwrap().1, AREA, 56),
+            0
+        );
+        assert_eq!(
+            restore_icon_top(corner_position("right-center").unwrap().1, AREA, 56),
+            512
+        );
+        assert_eq!(
+            restore_icon_top(corner_position("right-bottom").unwrap().1, AREA, 56),
+            1024
+        );
     }
     #[test]
     fn detached_panel_stops_following_icon() {

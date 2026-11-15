@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type {
   AppSettings,
@@ -10,18 +10,30 @@ import type {
   ReactionTally,
 } from '../../../bridge/src';
 import {
+  attachmentPreview,
+  attachmentPreviewVersion,
+  clearAttachmentPreviews,
+  loadAttachmentPreview,
+  subscribeAttachmentPreviews,
+  type AttachmentPreviewSource,
+} from '../attachmentPreviews';
+import {
   Avatar,
   ContextMenu,
   EmptyState,
   Icon,
   IconButton,
   MessageBubble,
+  PeerAvatar,
   SearchInput,
   Tooltip,
   avatarPaletteFor,
   cx,
   formatDuration,
   initialsFor,
+  presenceForPeer,
+  statusLineFor,
+  withinEditWindow,
   type ContextMenuEntry,
   type DeliveryState,
   type FileTransferState,
@@ -30,7 +42,8 @@ import {
 } from '../components';
 import { ns, registerNamespace } from '../i18n';
 import chatCatalog from '../i18n/en/chat';
-import { messageTime, type ToastTone } from './shared';
+import { applySinkId, openMedia } from '../media';
+import { authorName, messageTime, type ToastTone } from './shared';
 import { VOICE_SAMPLE_RATE, downsample, mergeSamples, wavBlob } from './voice';
 import './chat.css';
 
@@ -115,7 +128,13 @@ function extensionOf(name: string): string {
   return dot > 0 ? name.slice(dot + 1).toLowerCase() : '';
 }
 
-function variantOf(message: ChatMessage, attachment?: Attachment): MessageVariant {
+/**
+ * Which bubble a file message is. A picture is only a picture once its bytes are on this
+ * machine and something can draw them, so the resolved preview — not the row — decides
+ * whether the bubble is media or a file chip; a video never resolves one, because neither
+ * webview will hand us a frame to show for it.
+ */
+function variantOf(message: ChatMessage, preview: string | null | undefined, attachment?: Attachment): MessageVariant {
   if (message.kind === 'deleted') return 'deleted';
   if (message.kind === 'event') return 'text';
   if (message.kind !== 'file') return 'text';
@@ -127,7 +146,7 @@ function variantOf(message: ChatMessage, attachment?: Attachment): MessageVarian
         ? 'video'
         : 'file');
   if (kind === 'audio') return 'voice';
-  if (attachment?.previewUrl && (kind === 'image' || kind === 'video')) return kind;
+  if (kind === 'image' && preview) return 'image';
   return 'file';
 }
 
@@ -207,6 +226,16 @@ export function Conversation({
   const peerName = peer?.name ?? chatId;
   const isGroup = Boolean(peer?.group);
 
+  /** The ids storage leaves in `sender` and in a reaction tally, read back as names. */
+  const nameOf = useCallback(
+    (id: string) =>
+      authorName(id, peers, {
+        id: myId,
+        name: settings.displayName.trim() || text('groupYou', 'You'),
+      }),
+    [myId, peers, settings.displayName],
+  );
+
   const reload = useCallback(async () => {
     const [history, files, pins] = await Promise.all([
       bridge.listMessages(chatId),
@@ -232,6 +261,9 @@ export function Conversation({
 
   useEffect(() => {
     let alive = true;
+    // Another thread's pictures are not this one's, and holding both would mean the
+    // cache grows with every chat opened in a long session.
+    clearAttachmentPreviews();
     setMessages([]);
     setSelected([]);
     setDraft('');
@@ -548,13 +580,18 @@ export function Conversation({
       return;
     }
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
+      const opened = await openMedia(navigator.mediaDevices, {
         audio: {
           deviceId: settings.microphone && settings.microphone !== 'default' ? { exact: settings.microphone } : undefined,
           echoCancellation: settings.echoCancellation,
           noiseSuppression: settings.noiseSuppression,
         },
+        video: false,
       });
+      if (opened.usedDefault) {
+        toast(text('micFallback', 'Your chosen microphone is not connected, so the default one recorded this.'), 'neutral');
+      }
+      const stream = opened.stream;
       const context = new AudioContextCtor();
       await context.resume();
       const source = context.createMediaStreamSource(stream);
@@ -663,8 +700,7 @@ export function Conversation({
 
   const beginEdit = useCallback(
     (message: ChatMessage) => {
-      const ms = stampOf(message);
-      const withinWindow = Number.isNaN(ms) || Date.now() - ms <= Math.max(0, settings.editWindowMinutes) * 60_000;
+      const withinWindow = withinEditWindow(stampOf(message), Date.now(), settings.editWindowMinutes);
       if (!withinWindow) {
         toast(
           text('cannotEditExpired', 'The edit window of {{minutes}} minutes has passed.', {
@@ -683,8 +719,7 @@ export function Conversation({
   const menuFor = useCallback(
     (message: ChatMessage): ContextMenuEntry[] => {
       const mine = isMine(message, myId);
-      const ms = stampOf(message);
-      const withinWindow = Number.isNaN(ms) || Date.now() - ms <= Math.max(0, settings.editWindowMinutes) * 60_000;
+      const withinWindow = withinEditWindow(stampOf(message), Date.now(), settings.editWindowMinutes);
       const isPinned = pinned.some(entry => entry.messageId === message.id);
       return [
         {
@@ -776,7 +811,7 @@ export function Conversation({
   const typing = Boolean(peer?.typing);
   const subtitle = typing
     ? text('typingNow', 'Typing…')
-    : peer?.status ||
+    : (peer && statusLineFor(peer)) ||
       (peer?.online
         ? text('encryptionOn', 'End-to-end encrypted on this local network')
         : text('peerUnavailable', 'Peer unavailable on the local network'));
@@ -787,12 +822,14 @@ export function Conversation({
       <header className="ac-convo__head">
         <IconButton iconSize={18} label={text('back', 'Back')} name="chevronLeft" onClick={onBack} />
         <button className="ac-convo__who" onClick={() => onToggleDetails(!detailsOpen)} type="button">
-          <Avatar
+          <PeerAvatar
             group={isGroup}
             initials={peer?.initials || initialsFor(peerName)}
             name={peerName}
-            presence={peer?.online ? 'online' : 'offline'}
+            peerId={isGroup ? null : peer?.id}
+            presence={peer ? presenceForPeer(peer) : 'offline'}
             size={40}
+            source={bridge}
           />
           <span className="ac-convo__names">
             <strong>{peerName}</strong>
@@ -862,7 +899,9 @@ export function Conversation({
           />
           <span className="ac-convo__strip-count">
             {findHits.length > 0
-              ? text('searchResultsMany', '{{count}} matches', { count: findHits.length })
+              ? findHits.length === 1
+                ? text('searchResults', '{{count}} match', { count: findHits.length })
+                : text('searchResultsMany', '{{count}} matches', { count: findHits.length })
               : findQuery.trim().length >= 2
                 ? text('noResultsTitle', 'Nothing found')
                 : ''}
@@ -942,20 +981,23 @@ export function Conversation({
                   {...shared}
                   attachment={attachmentByMessage.get(row.message.id)}
                   byId={byId}
-                  isGroup={isGroup}
+                  grouped={row.grouped}
                   key={row.id}
                   message={row.message}
                   mine={isMine(row.message, myId)}
+                  nameOf={nameOf}
                   onContextMenu={point => setMenu({ message: row.message, ...point })}
                   onOpen={id => void bridge.openAttachment(id).catch(() => undefined)}
                   onReact={emoji => void react(row.message, emoji)}
                   onReply={() => setReplyTo(row.message)}
-                  onSelect={on => toggleSelected(row.message.id, on)}
+                  onSelect={selectionOn ? on => toggleSelected(row.message.id, on) : undefined}
                   onTransfer={control}
                   onVoiceError={voiceError}
                   onVoiceSource={voiceSource}
+                  previewSource={bridge}
                   reactions={reactions[row.message.id] ?? []}
-                  selected={selected.includes(row.message.id)}
+                  selected={selectionOn ? selected.includes(row.message.id) : undefined}
+                  speaker={settings.speaker}
                   starred={starred.includes(row.message.id)}
                 />
               );
@@ -1055,11 +1097,16 @@ export function Conversation({
               <IconButton active={emojiOpen} iconSize={18} label={text('emoji', 'Emoji')} name="smile" onClick={() => setEmojiOpen(open => !open)} />
             </Tooltip>
             {editing ? (
-              <button className="ac-composer__send" onClick={() => void commitEdit()} type="button">
+              <button
+                aria-label={text('confirm', 'Confirm')}
+                className="ac-composer__send"
+                onClick={() => void commitEdit()}
+                type="button"
+              >
                 <Icon name="check" size={17} />
               </button>
             ) : draft.trim() ? (
-              <button className="ac-composer__send" onClick={() => void send()} type="button">
+              <button aria-label={text('send', 'Send')} className="ac-composer__send" onClick={() => void send()} type="button">
                 <Icon name="send" size={17} />
               </button>
             ) : (
@@ -1231,11 +1278,15 @@ type RowProps = {
   attachment: Attachment | undefined;
   reactions: ReactionTally[];
   mine: boolean;
-  isGroup: boolean;
-  selected: boolean;
+  /** Consecutive message from the same sender: the avatar slot collapses. */
+  grouped: boolean;
+  /** Names for the ids storage leaves in `sender` and in a reaction tally. */
+  nameOf: (id: string) => string;
+  /** Only while multi-select is on; otherwise the row shows no checkbox. */
+  selected?: boolean;
   starred: boolean;
   byId: Map<string, ChatMessage>;
-  onSelect: (on: boolean) => void;
+  onSelect?: (on: boolean) => void;
   onReply: () => void;
   onReact: (emoji: string) => void;
   onContextMenu: (point: { x: number; y: number }) => void;
@@ -1243,6 +1294,10 @@ type RowProps = {
   onOpen: (id: string) => void;
   onVoiceSource: (id: string) => Promise<string | null>;
   onVoiceError: (error: unknown) => void;
+  /** Reads one finished attachment's bytes, for the picture this row may draw. */
+  previewSource: AttachmentPreviewSource;
+  /** The Settings → Calls output, honoured where the engine can name one. */
+  speaker?: string;
 };
 
 function MessageRow({
@@ -1253,7 +1308,8 @@ function MessageRow({
   attachment,
   reactions,
   mine,
-  isGroup,
+  grouped,
+  nameOf,
   selected,
   starred,
   byId,
@@ -1265,8 +1321,21 @@ function MessageRow({
   onOpen,
   onVoiceSource,
   onVoiceError,
+  previewSource,
+  speaker,
 }: RowProps) {
-  const variant = variantOf(message, attachment);
+  // Pictures come from a shared cache, so this row and the media grid agree on what a
+  // finished attachment looks like and only one of them pays for the bytes.
+  const previewVersion = useSyncExternalStore(
+    subscribeAttachmentPreviews,
+    attachmentPreviewVersion,
+    attachmentPreviewVersion,
+  );
+  useEffect(() => {
+    if (attachment) loadAttachmentPreview(previewSource, attachment);
+  }, [attachment, previewSource, previewVersion]);
+  const preview = attachmentPreview(attachment?.id);
+  const variant = variantOf(message, preview, attachment);
   const [playing, setPlaying] = useState(false);
   const [playedSeconds, setPlayedSeconds] = useState(0);
   const [measuredSeconds, setMeasuredSeconds] = useState<number | null>(null);
@@ -1278,6 +1347,8 @@ function MessageRow({
   sourceRef.current = onVoiceSource;
   const errorRef = useRef(onVoiceError);
   errorRef.current = onVoiceError;
+  const speakerRef = useRef(speaker);
+  speakerRef.current = speaker;
 
   // Loading the bytes on mount keeps the press-to-play path synchronous: WebKit only
   // starts media from the gesture itself, not from a promise resolved later.
@@ -1294,6 +1365,7 @@ function MessageRow({
         }
         const audio = new Audio(source);
         audioRef.current = audio;
+        applySinkId(audio, speakerRef.current);
         audio.onplay = () => setPlaying(true);
         audio.onpause = () => setPlaying(false);
         audio.onended = () => {
@@ -1314,6 +1386,11 @@ function MessageRow({
     };
   }, [attachmentId, variant]);
 
+  // Settings is another window, so the chosen output can move while a note is still playing.
+  useEffect(() => {
+    if (audioRef.current) applySinkId(audioRef.current, speaker);
+  }, [speaker]);
+
   const toggleVoice = useCallback(() => {
     const audio = audioRef.current;
     if (!audio) {
@@ -1323,7 +1400,9 @@ function MessageRow({
     if (audio.paused) void audio.play().catch(error => errorRef.current(error));
     else audio.pause();
   }, []);
-  const inputs: ReactionInput[] = reactions.flatMap(tally => tally.peers.map(peerId => ({ emoji: tally.emoji, by: peerId })));
+  const inputs: ReactionInput[] = reactions.flatMap(tally =>
+    tally.peers.map(peerId => ({ emoji: tally.emoji, by: nameOf(peerId) })),
+  );
   const quoted = message.replyTo ? byId.get(message.replyTo) : undefined;
   const wrap = { 'data-index': index, ref: wrapRef, style };
 
@@ -1338,7 +1417,6 @@ function MessageRow({
   return (
     <div {...wrap} className={cx('ac-convo__row', mine && 'ac-convo__row--mine')}>
       <span className="ac-convo__stack">
-        {isGroup && !mine ? <span className="ac-convo__sender">{message.sender}</span> : null}
         <MessageBubble
           actions={
             <>
@@ -1353,13 +1431,17 @@ function MessageRow({
           }
           delivery={mine ? deliveryOf(message) : undefined}
           edited={message.edited}
+          editedLabel={text('editedTag', '(edited)')}
           fileName={attachment?.name ?? message.fileName}
           fileSize={attachment?.bytes}
+          forwarded={message.forwarded}
+          forwardedLabel={text('forwardedLabel', 'Forwarded')}
           media={
-            attachment?.previewUrl && (variant === 'image' || variant === 'video')
-              ? [{ alt: attachment.name, src: attachment.previewUrl }]
+            preview && variant === 'image' && attachment
+              ? [{ alt: attachment.name, src: preview }]
               : undefined
           }
+          grouped={grouped}
           mine={mine}
           onContextMenu={onContextMenu}
           onDownload={attachment ? () => onOpen(attachment.id) : undefined}
@@ -1374,9 +1456,9 @@ function MessageRow({
           playedSeconds={playing ? Math.floor(playedSeconds) : 0}
           playing={playing}
           reactions={inputs}
-          reply={quoted ? { sender: quoted.sender, text: quoted.text } : undefined}
+          reply={quoted ? { sender: nameOf(quoted.sender), text: quoted.text } : undefined}
           selected={selected}
-          sender={message.sender}
+          sender={nameOf(message.sender)}
           senderColor={avatarPaletteFor(message.sender)}
           text={variant === 'deleted' ? text('deletedMessage', 'This message was deleted.') : message.text}
           time={messageTime(message)}

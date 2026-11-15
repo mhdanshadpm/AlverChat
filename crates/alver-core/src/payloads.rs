@@ -36,6 +36,10 @@ pub const MAX_ATTACHMENTS: usize = 64;
 /// Envelope type names. These are the single source of truth for
 /// [`crate::protocol`]'s known-type table.
 pub mod kind {
+    /// The LAN passphrase challenge this build exchanges right after the session opens:
+    /// a random nonce plus a keyed BLAKE3 MAC over both peer ids, or `mac: null` from a
+    /// device that has no passphrase. Both sides must agree, or neither talks.
+    pub const AUTH: &str = "auth";
     pub const HELLO: &str = "hello";
     pub const HELLO_ACK: &str = "hello_ack";
     pub const PRESENCE: &str = "presence";
@@ -49,6 +53,12 @@ pub mod kind {
     pub const RECEIPT: &str = "receipt";
     pub const TYPING: &str = "typing";
     pub const PIN_UPDATE: &str = "pin_update";
+    /// One signed `GroupState` successor: the frame this build puts on the wire for a
+    /// create, a rename, an icon change or a membership change, because the state object
+    /// carries its own epoch and signature and needs no per-change envelope. Its payload
+    /// is the state itself; the four `group_*` kinds below are the older split design that
+    /// wraps it under `state`, and nothing in this build sends one.
+    pub const GROUP_STATE: &str = "group";
     pub const GROUP_CREATE: &str = "group_create";
     pub const GROUP_UPDATE: &str = "group_update";
     pub const GROUP_MEMBER_CHANGE: &str = "group_member_change";
@@ -74,6 +84,7 @@ pub mod kind {
 
 /// Every envelope type the protocol knows about, in declaration order.
 pub const ALL_TYPES: &[&str] = &[
+    kind::AUTH,
     kind::HELLO,
     kind::HELLO_ACK,
     kind::PRESENCE,
@@ -87,6 +98,7 @@ pub const ALL_TYPES: &[&str] = &[
     kind::RECEIPT,
     kind::TYPING,
     kind::PIN_UPDATE,
+    kind::GROUP_STATE,
     kind::GROUP_CREATE,
     kind::GROUP_UPDATE,
     kind::GROUP_MEMBER_CHANGE,
@@ -135,6 +147,16 @@ pub type MessageAttachment = AttachmentRef;
 pub struct MessageRef {
     pub chat_id: String,
     pub message_id: Uuid,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuthPayload {
+    /// Base64 of 32 fresh random bytes, chosen by whoever sends it first.
+    pub nonce: String,
+    /// Base64 keyed MAC over the secret, both peer ids and this frame's nonce. Absent on a
+    /// device that set no passphrase, which is what makes a half-set pair fail on both ends.
+    #[serde(default)]
+    pub mac: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -197,16 +219,22 @@ pub struct AvatarDataPayload {
     pub width: u32,
     #[serde(default)]
     pub height: u32,
-    #[serde(default)]
+    #[serde(default, with = "bytes_codec")]
     pub bytes: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MessagePayload {
     pub chat_id: String,
-    pub body: String,
+    /// The body, under the key the desktop both writes and requires: a frame without `text`
+    /// is refused by the reader, so the table names it the same way.
+    pub text: String,
     #[serde(default)]
     pub reply_to: Option<Uuid>,
+    /// A copy of something forwarded from elsewhere. A frame from an older build carries no
+    /// key, and the honest reading of that is an original.
+    #[serde(default)]
+    pub forwarded: bool,
     #[serde(default)]
     pub attachments: Vec<MessageAttachment>,
 }
@@ -266,6 +294,11 @@ pub struct PinUpdatePayload {
     pub position: u32,
 }
 
+/// The payload of [`kind::GROUP_STATE`]: a signed `GroupState`, sent bare.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct GroupStatePayload(pub GroupState);
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GroupCreatePayload {
     pub state: GroupState,
@@ -301,7 +334,9 @@ pub struct GroupIconUpdatePayload {
 pub struct AnnouncementPayload {
     pub announcement_id: Uuid,
     pub group_id: String,
-    pub body: String,
+    /// The body, under the key the desktop both writes and requires: `text`, not `body`.
+    /// A round-trip fixture cannot tell the two apart, so the name has to match the wire.
+    pub text: String,
     #[serde(default)]
     pub created_ms: u64,
     #[serde(default)]
@@ -470,6 +505,7 @@ pub struct ByePayload {
 pub enum IgnoreReason {
     /// The peer used a type this build does not know.
     UnknownType,
+    Auth,
     Hello,
     HelloAck,
     Presence,
@@ -483,6 +519,7 @@ pub enum IgnoreReason {
     Receipt,
     Typing,
     PinUpdate,
+    GroupState,
     GroupCreate,
     GroupUpdate,
     GroupMemberChange,
@@ -517,6 +554,7 @@ pub struct Ignored {
 /// The typed view of any received envelope payload.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Payload {
+    Auth(AuthPayload),
     Hello(HelloPayload),
     HelloAck(HelloAckPayload),
     Presence(PresencePayload),
@@ -530,6 +568,7 @@ pub enum Payload {
     Receipt(ReceiptPayload),
     Typing(TypingPayload),
     PinUpdate(PinUpdatePayload),
+    GroupState(GroupStatePayload),
     GroupCreate(GroupCreatePayload),
     GroupUpdate(GroupUpdatePayload),
     GroupMemberChange(GroupMemberChangePayload),
@@ -561,6 +600,7 @@ impl Payload {
     pub fn payload_json(&self) -> Option<Value> {
         match self {
             Self::Ignored(_) => None,
+            Self::Auth(p) => serde_json::to_value(p).ok(),
             Self::Hello(p) => serde_json::to_value(p).ok(),
             Self::HelloAck(p) => serde_json::to_value(p).ok(),
             Self::Presence(p) => serde_json::to_value(p).ok(),
@@ -574,6 +614,7 @@ impl Payload {
             Self::Receipt(p) => serde_json::to_value(p).ok(),
             Self::Typing(p) => serde_json::to_value(p).ok(),
             Self::PinUpdate(p) => serde_json::to_value(p).ok(),
+            Self::GroupState(p) => serde_json::to_value(p).ok(),
             Self::GroupCreate(p) => serde_json::to_value(p).ok(),
             Self::GroupUpdate(p) => serde_json::to_value(p).ok(),
             Self::GroupMemberChange(p) => serde_json::to_value(p).ok(),
@@ -609,6 +650,7 @@ impl Payload {
     pub fn type_name(&self) -> &'static str {
         match self {
             Self::Ignored(_) => "",
+            Self::Auth(_) => kind::AUTH,
             Self::Hello(_) => kind::HELLO,
             Self::HelloAck(_) => kind::HELLO_ACK,
             Self::Presence(_) => kind::PRESENCE,
@@ -622,6 +664,7 @@ impl Payload {
             Self::Receipt(_) => kind::RECEIPT,
             Self::Typing(_) => kind::TYPING,
             Self::PinUpdate(_) => kind::PIN_UPDATE,
+            Self::GroupState(_) => kind::GROUP_STATE,
             Self::GroupCreate(_) => kind::GROUP_CREATE,
             Self::GroupUpdate(_) => kind::GROUP_UPDATE,
             Self::GroupMemberChange(_) => kind::GROUP_MEMBER_CHANGE,
@@ -651,7 +694,9 @@ impl Payload {
     pub fn dispatch(&self) -> Dispatch {
         match self {
             Self::Ignored(_) => Dispatch::Ignore,
-            Self::Hello(_) | Self::HelloAck(_) | Self::Bye(_) => Dispatch::Handshake,
+            Self::Auth(_) | Self::Hello(_) | Self::HelloAck(_) | Self::Bye(_) => {
+                Dispatch::Handshake
+            }
             Self::Presence(_)
             | Self::ProfileUpdate(_)
             | Self::AvatarRequest(_)
@@ -667,7 +712,8 @@ impl Payload {
             | Self::PinUpdate(_)
             | Self::Announcement(_)
             | Self::AnnouncementAck(_) => Dispatch::Conversation,
-            Self::GroupCreate(_)
+            Self::GroupState(_)
+            | Self::GroupCreate(_)
             | Self::GroupUpdate(_)
             | Self::GroupMemberChange(_)
             | Self::GroupIconUpdate(_) => Dispatch::Groups,
@@ -690,14 +736,14 @@ impl Payload {
     fn size_violation(&self) -> Option<IgnoreReason> {
         match self {
             Self::Message(p)
-                if p.body.len() > MAX_BODY_BYTES || p.attachments.len() > MAX_ATTACHMENTS =>
+                if p.text.len() > MAX_BODY_BYTES || p.attachments.len() > MAX_ATTACHMENTS =>
             {
                 Some(IgnoreReason::Message)
             }
             Self::MessageEdit(p) if p.body.len() > MAX_BODY_BYTES => {
                 Some(IgnoreReason::MessageEdit)
             }
-            Self::Announcement(p) if p.body.len() > MAX_BODY_BYTES => {
+            Self::Announcement(p) if p.text.len() > MAX_BODY_BYTES => {
                 Some(IgnoreReason::Announcement)
             }
             Self::Reaction(p) if p.emoji.len() > MAX_REACTION_BYTES => Some(IgnoreReason::Reaction),
@@ -722,6 +768,7 @@ impl Payload {
 pub fn classify(envelope: &Envelope<Value>) -> Payload {
     let value = &envelope.payload;
     let parsed: Result<Payload, IgnoreReason> = match envelope.kind.as_str() {
+        kind::AUTH => parse(value, Payload::Auth, IgnoreReason::Auth),
         kind::HELLO => parse(value, Payload::Hello, IgnoreReason::Hello),
         kind::HELLO_ACK => parse(value, Payload::HelloAck, IgnoreReason::HelloAck),
         kind::PRESENCE => parse(value, Payload::Presence, IgnoreReason::Presence),
@@ -735,6 +782,7 @@ pub fn classify(envelope: &Envelope<Value>) -> Payload {
         kind::RECEIPT => parse(value, Payload::Receipt, IgnoreReason::Receipt),
         kind::TYPING => parse(value, Payload::Typing, IgnoreReason::Typing),
         kind::PIN_UPDATE => parse(value, Payload::PinUpdate, IgnoreReason::PinUpdate),
+        kind::GROUP_STATE => parse(value, Payload::GroupState, IgnoreReason::GroupState),
         kind::GROUP_CREATE => parse(value, Payload::GroupCreate, IgnoreReason::GroupCreate),
         kind::GROUP_UPDATE => parse(value, Payload::GroupUpdate, IgnoreReason::GroupUpdate),
         kind::GROUP_MEMBER_CHANGE => parse(
@@ -911,6 +959,13 @@ mod tests {
         let state = group_state();
         vec![
             (
+                kind::AUTH,
+                Payload::Auth(AuthPayload {
+                    nonce: "t9G7Q0Z0m1Vg2w8oQq4hKdLs7nYp3RfBcXaJ0kUeTiM=".into(),
+                    mac: Some("kQ2m1Vg2w8oQq4hKdLs7nYp3RfBcXaJ0kUeTiMt9G7Q=".into()),
+                }),
+            ),
+            (
                 kind::HELLO,
                 Payload::Hello(HelloPayload {
                     peer_id: "peer-a".into(),
@@ -965,8 +1020,9 @@ mod tests {
                 kind::MESSAGE,
                 Payload::Message(MessagePayload {
                     chat_id: "chat-a".into(),
-                    body: "hello".into(),
+                    text: "hello".into(),
                     reply_to: Some(message_ref().message_id),
+                    forwarded: false,
                     attachments: vec![attachment()],
                 }),
             ),
@@ -1020,6 +1076,10 @@ mod tests {
                 }),
             ),
             (
+                kind::GROUP_STATE,
+                Payload::GroupState(GroupStatePayload(state.clone())),
+            ),
+            (
                 kind::GROUP_CREATE,
                 Payload::GroupCreate(GroupCreatePayload {
                     state: state.clone(),
@@ -1054,7 +1114,7 @@ mod tests {
                 Payload::Announcement(AnnouncementPayload {
                     announcement_id: message_ref().message_id,
                     group_id: "group-1".into(),
-                    body: "freeze next monday".into(),
+                    text: "freeze next monday".into(),
                     created_ms: 50,
                     admins_only: true,
                 }),
@@ -1283,6 +1343,30 @@ mod tests {
     }
 
     #[test]
+    fn the_largest_avatar_rides_one_control_frame() {
+        let offer = Payload::AvatarData(AvatarDataPayload {
+            peer_id: "peer-a".into(),
+            hash: "ab".repeat(64),
+            media_type: "image/png".into(),
+            width: 512,
+            height: 512,
+            bytes: vec![0x5a_u8; MAX_AVATAR_BYTES],
+        });
+        let json = offer.payload_json().unwrap();
+        assert!(
+            json["bytes"].is_string(),
+            "avatar bytes travel base64-encoded, so a number array cannot bloat the frame"
+        );
+        let bytes = serde_json::to_vec(&envelope(kind::AVATAR_DATA, json)).unwrap();
+        assert!(
+            bytes.len() <= crate::protocol::MAX_CONTROL_FRAME_BYTES,
+            "a full avatar serializes to {} bytes, over the control-frame limit",
+            bytes.len()
+        );
+        assert_eq!(decode_payload_frame(&bytes).unwrap(), offer);
+    }
+
+    #[test]
     fn malformed_or_oversized_payloads_are_ignored_not_fatal() {
         let missing = envelope(kind::MESSAGE, serde_json::json!({"chat_id": "c"}));
         assert_eq!(
@@ -1295,7 +1379,7 @@ mod tests {
         );
         let oversized = envelope(
             kind::MESSAGE,
-            serde_json::json!({ "chat_id": "c", "body": "x".repeat(MAX_BODY_BYTES + 1) }),
+            serde_json::json!({ "chat_id": "c", "text": "x".repeat(MAX_BODY_BYTES + 1) }),
         );
         assert!(classify(&oversized).is_ignored());
         let fat = Payload::FileChunk(FileChunkPayload {

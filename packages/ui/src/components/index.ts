@@ -12,6 +12,8 @@ export type { IconButtonProps, IconButtonSize, IconButtonVariant } from './IconB
 
 /* ===== Identity ===== */
 export { Avatar, AvatarStack, PresenceDot } from './Avatar';
+export { PeerAvatar } from './PeerAvatar';
+export type { PeerAvatarProps } from './PeerAvatar';
 export type {
   AvatarProps,
   AvatarSize,
@@ -108,9 +110,12 @@ export {
   groupReactions,
   initialsFor,
   nextIndexOf,
+  presenceForPeer,
   reactionTooltip,
+  statusLineFor,
   transferPercent,
   typeaheadIndex,
+  withinEditWindow,
   waveformBars,
   waveformProgress,
 } from './logic';

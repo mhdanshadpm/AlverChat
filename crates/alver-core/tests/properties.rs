@@ -35,6 +35,7 @@ fn message(body: &str, sender: &str, at: u64) -> Message {
             logical: 0,
         },
         tombstone: false,
+        forwarded: false,
     }
 }
 

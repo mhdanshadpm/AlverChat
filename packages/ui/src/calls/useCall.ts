@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AppSettings, CallSignal, IncomingCallSignal, PlatformBridge } from '../../../bridge/src';
+import { openMedia } from '../media';
 
 export type CallPhase = 'idle' | 'calling' | 'ringing' | 'active' | 'ended' | 'failed';
 export type CallMedia = 'audio' | 'video';
@@ -75,6 +76,7 @@ export function useCall(
   const pendingIce = useRef<RTCIceCandidateInit[]>([]);
   const offerSdp = useRef<string>('');
   const screenStream = useRef<MediaStream | null>(null);
+  const startingRef = useRef(false);
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
 
@@ -119,6 +121,22 @@ export function useCall(
     [teardown, update],
   );
 
+  /**
+   * Ends a call this side cannot continue. Hanging up locally without a frame would leave
+   * the peer ringing and both docks showing an In-Call chip nobody can clear, because the
+   * live-call registry is built from the signalling the shell relays.
+   */
+  const fail = useCallback(
+    (message: string) => {
+      const current = callRef.current;
+      if (current.callId && current.phase !== 'failed') {
+        send(current.chatId, { callId: current.callId, kind: 'end', reason: 'failed' });
+      }
+      finish('failed', message);
+    },
+    [finish, send],
+  );
+
   const attach = useCallback(
     (pc: RTCPeerConnection, chatId: string) => {
       pc.onicecandidate = event => {
@@ -137,34 +155,43 @@ export function useCall(
         update({ remoteStream: stream });
       };
       pc.onconnectionstatechange = () => {
-        if (pc.connectionState === 'failed') finish('failed', 'The connection could not be established.');
+        if (pc.connectionState === 'failed') fail('The connection could not be established.');
       };
     },
-    [finish, send, update],
+    [fail, send, update],
   );
 
   const local = useCallback(async (media: CallMedia) => {
     try {
-      return await navigator.mediaDevices.getUserMedia(mediaFor(media, settingsRef.current));
+      const opened = await openMedia(navigator.mediaDevices, mediaFor(media, settingsRef.current));
+      if (opened.usedDefault) {
+        toast('The microphone or camera you chose is not connected — using the system default.', 'danger');
+      }
+      return opened.stream;
     } catch (error) {
       const name = error instanceof DOMException ? error.name : '';
       if (name === 'NotAllowedError') throw new Error('Microphone or camera access was denied.');
       if (name === 'NotFoundError') throw new Error('No microphone or camera was found.');
       throw new Error(`Could not start the microphone or camera: ${String(error)}`);
     }
-  }, []);
+  }, [toast]);
 
   const start = useCallback(
     async (chatId: string, media: CallMedia, peerName: string) => {
+      if (startingRef.current) return;
       if (callRef.current.phase === 'calling' || callRef.current.phase === 'active' || callRef.current.phase === 'ringing') {
         toast('A call is already in progress.', 'danger');
         return;
       }
+      // Hold the guard across getUserMedia: a second click while the OS
+      // permission sheet is pending would otherwise start a competing call.
+      startingRef.current = true;
       teardown();
       let stream: MediaStream;
       try {
         stream = await local(media);
       } catch (error) {
+        startingRef.current = false;
         toast(String(error instanceof Error ? error.message : error), 'danger');
         return;
       }
@@ -176,15 +203,22 @@ export function useCall(
       pc.onnegotiationneeded = () => {
         void (async () => {
           if (pc.signalingState !== 'stable') return;
-          const offer = await pc.createOffer();
-          // The first offer carries the media choice; later ones only renegotiate.
-          await pc.setLocalDescription(offer);
-          send(chatId, {
-            callId,
-            kind: 'offer',
-            media: callRef.current.sharing ? 'screen' : callRef.current.media,
-            sdp: offer.sdp ?? '',
-          });
+          try {
+            const offer = await pc.createOffer();
+            // The first offer carries the media choice; later ones only renegotiate.
+            await pc.setLocalDescription(offer);
+            send(chatId, {
+              callId,
+              kind: 'offer',
+              media: callRef.current.sharing ? 'screen' : callRef.current.media,
+              sdp: offer.sdp ?? '',
+            });
+          } catch (error) {
+            // A renegotiation that fails leaves a running call on the track set it already
+            // agreed; only an offer that never left this side means there is no call.
+            if (callRef.current.phase === 'calling') fail(`The call could not be started: ${String(error)}`);
+            else toast(`The call could not be renegotiated: ${String(error)}`, 'danger');
+          }
         })();
       };
       callRef.current = {
@@ -198,15 +232,20 @@ export function useCall(
         localStream: stream,
       };
       setCall(callRef.current);
+      startingRef.current = false;
       // Adding tracks above triggers `onnegotiationneeded`, but Safari needs a nudge when
       // the listener is installed after the tracks.
       if (pc.signalingState === 'stable' && !pc.localDescription) {
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        send(chatId, { callId, kind: 'offer', media, sdp: offer.sdp ?? '' });
+        try {
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          send(chatId, { callId, kind: 'offer', media, sdp: offer.sdp ?? '' });
+        } catch (error) {
+          fail(`The call could not be started: ${String(error)}`);
+        }
       }
     },
-    [attach, local, send, teardown, toast],
+    [attach, fail, local, send, teardown, toast],
   );
 
   const accept = useCallback(async () => {
@@ -238,9 +277,9 @@ export function useCall(
         error: null,
       });
     } catch (error) {
-      finish('failed', `Could not answer the call: ${String(error)}`);
+      fail(`Could not answer the call: ${String(error)}`);
     }
-  }, [attach, finish, local, send, update]);
+  }, [attach, fail, finish, local, send, update]);
 
   const decline = useCallback(() => {
     const current = callRef.current;
@@ -403,7 +442,7 @@ export function useCall(
             });
           } catch (error) {
             toast(`Could not renegotiate the call: ${String(error)}`, 'danger');
-            finish('failed', 'The call connection changed unexpectedly.');
+            fail('The call connection changed unexpectedly.');
           }
           return;
         }
@@ -443,7 +482,7 @@ export function useCall(
           for (const candidate of pendingIce.current.splice(0)) await pc.addIceCandidate(candidate);
           update({ phase: 'active', startedAt: Date.now() });
         } catch (error) {
-          finish('failed', `The peer's answer was unusable: ${String(error)}`);
+          fail(`The peer's answer was unusable: ${String(error)}`);
         }
         return;
       }
@@ -473,7 +512,7 @@ export function useCall(
         finish('failed', 'The peer is on another call.');
       }
     },
-    [finish, send, teardown, toast, update],
+    [fail, finish, send, teardown, toast, update],
   );
 
   useEffect(() => {

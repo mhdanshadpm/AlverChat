@@ -8,7 +8,7 @@
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{de::DeserializeOwned, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use uuid::Uuid;
 
 use crate::files::TransferState;
@@ -21,6 +21,13 @@ use crate::storage::Store;
 use crate::{Envelope, Hlc, Message};
 
 /// Well-known setting keys. Values are JSON-encoded text in the `settings` table.
+///
+/// Every key here has a reader below, and `every_declared_setting_key_is_read` fails the
+/// build if one stops having one: a key with no reader is a promise about a preference
+/// nothing does. This table is the *library's* override surface, not the app's settings
+/// screen — the desktop keeps its preferences in `settings.json` and reads them live at
+/// each decision point (see `file_transfer::policy` and `edit_message_local`), so a key
+/// written by no command is a capability for a caller that embeds the crate, not a knob.
 pub mod setting {
     /// `u64` milliseconds; see [`crate::rules::EditWindow`].
     pub const EDIT_WINDOW_MS: &str = "message.edit_window_ms";
@@ -32,24 +39,19 @@ pub mod setting {
     pub const ANNOUNCEMENTS_ADMINS_ONLY: &str = "announcement.admins_only";
     /// `u64` days of history kept by [`Store::apply_retention`].
     pub const RETENTION_DAYS: &str = "history.retention_days";
-    /// `u64`; sustained events per second per peer.
-    pub const RATE_LIMIT_PER_SECOND: &str = "network.rate_limit_per_second";
-    /// `u64`; burst allowance per peer.
-    pub const RATE_LIMIT_BURST: &str = "network.rate_limit_burst";
     /// `u64` bytes; avatar payload budget.
     pub const AVATAR_MAX_BYTES: &str = "avatar.max_bytes";
     /// `u64` pixels; avatar edge budget.
     pub const AVATAR_MAX_DIMENSION: &str = "avatar.max_dimension";
     /// `u64` pixels; avatar pixel-count budget against decompression bombs.
     pub const AVATAR_MAX_PIXELS: &str = "avatar.max_pixels";
-    /// `bool`; refuse reads of tombstoned messages in history views.
-    pub const HIDE_DELETED_MESSAGES: &str = "history.hide_deleted_messages";
 }
 
-const MESSAGE_COLUMNS: &str = "id, chat_id, sender, body, physical_ms, logical, tombstone";
+const MESSAGE_COLUMNS: &str =
+    "id, chat_id, sender, body, physical_ms, logical, tombstone, forwarded";
 /// Same columns, always qualified, for the join queries.
 const JOINED_MESSAGE_COLUMNS: &str = "messages.id, messages.chat_id, messages.sender, \
-    messages.body, messages.physical_ms, messages.logical, messages.tombstone";
+    messages.body, messages.physical_ms, messages.logical, messages.tombstone, messages.forwarded";
 
 /// A stored reaction.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,6 +77,8 @@ pub struct PinnedMessage {
     pub message: Message,
     pub position: u32,
     pub pinned_ms: u64,
+    /// The device that pinned it; empty for a row written before migration v7 recorded one.
+    pub pinned_by: String,
 }
 
 /// A starred message.
@@ -236,6 +240,7 @@ fn message_from_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<
             logical: row.get::<_, i64>(offset + 5)?.max(0) as u32,
         },
         tombstone: row.get::<_, i64>(offset + 6)? != 0,
+        forwarded: row.get::<_, i64>(offset + 7)? != 0,
     })
 }
 
@@ -534,6 +539,37 @@ impl Store {
         Ok(cleared)
     }
 
+    /// Messages of `chat_id` that I sent and `reader_id` has marked read.
+    ///
+    /// This is the sender's side of a read receipt: only the peer in a direct chat can
+    /// raise it, and a group thread has no single reader to ask.
+    pub fn read_receipt_ids_for_chat(
+        &self,
+        chat_id: &str,
+        sender_id: &str,
+        reader_id: &str,
+    ) -> Result<HashSet<Uuid>, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT receipts.message_id FROM receipts \
+                 JOIN messages ON messages.id = receipts.message_id \
+                 WHERE messages.chat_id = ?1 AND messages.sender = ?2 \
+                 AND receipts.peer_id = ?3 AND receipts.kind = 'read'",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(params![chat_id, sender_id, reader_id], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|error| error.to_string())?;
+        rows.map(|row| {
+            row.map_err(|error| error.to_string())
+                .and_then(|id| Uuid::parse_str(&id).map_err(|error| error.to_string()))
+        })
+        .collect()
+    }
+
     /// Removes my read receipts in a chat so the unread count returns; returns how many.
     pub fn mark_chat_unread(&mut self, chat_id: &str, reader_id: &str) -> Result<usize, String> {
         if chat_id.trim().is_empty() || reader_id.trim().is_empty() {
@@ -550,7 +586,16 @@ impl Store {
     }
 
     /// Pins a message inside its chat; false when the message is missing or tombstoned.
-    pub fn pin(&mut self, message_id: Uuid, position: u32, pinned_ms: u64) -> Result<bool, String> {
+    ///
+    /// `pinned_by` is the device that asked for the pin, which is not always the device
+    /// holding the row: a peer's `pin_update` frame writes one here too.
+    pub fn pin(
+        &mut self,
+        message_id: Uuid,
+        position: u32,
+        pinned_ms: u64,
+        pinned_by: &str,
+    ) -> Result<bool, String> {
         let transaction = self.connection.transaction().map_err(|e| e.to_string())?;
         let Some(message) = Self::read_message(&transaction, message_id)? else {
             return Ok(false);
@@ -560,8 +605,8 @@ impl Store {
         }
         transaction
             .execute(
-                "INSERT INTO pins(message_id, chat_id, position, pinned_ms) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(message_id) DO UPDATE SET position = excluded.position, pinned_ms = excluded.pinned_ms",
-                params![message_id.to_string(), message.chat_id, position, to_ms(pinned_ms)],
+                "INSERT INTO pins(message_id, chat_id, position, pinned_ms, pinned_by) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(message_id) DO UPDATE SET position = excluded.position, pinned_ms = excluded.pinned_ms, pinned_by = excluded.pinned_by",
+                params![message_id.to_string(), message.chat_id, position, to_ms(pinned_ms), pinned_by],
             )
             .map_err(|error| error.to_string())?;
         transaction.commit().map_err(|error| error.to_string())?;
@@ -583,7 +628,7 @@ impl Store {
         let mut statement = self
             .connection
             .prepare(&format!(
-                "SELECT pins.position, pins.pinned_ms, {JOINED_MESSAGE_COLUMNS} \
+                "SELECT pins.position, pins.pinned_ms, pins.pinned_by, {JOINED_MESSAGE_COLUMNS} \
                  FROM pins JOIN messages ON messages.id = pins.message_id \
                  WHERE pins.chat_id = ?1 \
                  ORDER BY pins.position, pins.pinned_ms, pins.message_id"
@@ -594,7 +639,8 @@ impl Store {
                 Ok(PinnedMessage {
                     position: row.get::<_, i64>(0)?.max(0) as u32,
                     pinned_ms: from_ms(row.get::<_, i64>(1)?),
-                    message: message_from_row(row, 2)?,
+                    pinned_by: row.get(2)?,
+                    message: message_from_row(row, 3)?,
                 })
             })
             .map_err(|error| error.to_string())?;
@@ -682,6 +728,23 @@ impl Store {
                 ],
             )
             .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    /// Retires every transfer row left claiming to be actively moving by a run that ended
+    /// mid-file, and reports how many rows changed. A driver does not survive a crash, so a
+    /// row that says `transferring` at startup is a row nothing is transferring: the next
+    /// pull would self-heal it, but until then the UI promises progress it cannot make. The
+    /// verified chunks are untouched, which is exactly what `paused` means here.
+    pub fn pause_stalled_transfers(&mut self) -> Result<usize, String> {
+        self.connection
+            .execute(
+                "UPDATE attachments SET status = ?1 WHERE status = ?2",
+                params![
+                    TransferState::Paused.as_str(),
+                    TransferState::Transferring.as_str()
+                ],
+            )
             .map_err(|error| error.to_string())
     }
 
@@ -869,6 +932,38 @@ impl Store {
             .map_err(|error| error.to_string())?;
         let rows = statement
             .query_map(params![group_id], |row| {
+                Ok(Announcement {
+                    id: uuid_from(row, 0)?,
+                    group_id: row.get(1)?,
+                    sender: row.get(2)?,
+                    body: row.get(3)?,
+                    clock: Hlc {
+                        physical_ms: from_ms(row.get::<_, i64>(4)?),
+                        logical: row.get::<_, i64>(5)?.max(0) as u32,
+                    },
+                    admins_only: row.get::<_, i64>(6)? != 0,
+                    created_ms: from_ms(row.get::<_, i64>(7)?),
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        rows.map(|row| row.map_err(|error| error.to_string()))
+            .collect()
+    }
+
+    /// Announcements this peer still owes an acknowledgement for, newest first.
+    ///
+    /// The dock bubble and the in-app banner both read this, so "pending" means
+    /// "not acknowledged by this device" everywhere, and the author's own posts
+    /// never come back to them.
+    pub fn pending_announcements(&self, peer_id: &str) -> Result<Vec<Announcement>, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT a.id, a.group_id, a.sender, a.body, a.physical_ms, a.logical, a.admins_only, a.created_ms FROM announcements a WHERE a.sender <> ?1 AND NOT EXISTS (SELECT 1 FROM announcement_acks k WHERE k.announcement_id = a.id AND k.peer_id = ?1) ORDER BY a.physical_ms DESC, a.logical DESC, a.id DESC",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(params![peer_id], |row| {
                 Ok(Announcement {
                     id: uuid_from(row, 0)?,
                     group_id: row.get(1)?,
@@ -1114,6 +1209,25 @@ impl Store {
         Ok(stored)
     }
 
+    /// Caches an avatar a peer offered, but only after the bytes hash to the digest that
+    /// offer declared. A cached photo is drawn by every window on this device, so the hash
+    /// is the only thing tying these bytes to the peer that published them; a mismatch is
+    /// refused and whatever was cached before stays.
+    pub fn cache_offered_avatar(&mut self, offered: &Avatar) -> Result<Avatar, String> {
+        let digest = blake3::hash(&offered.bytes).to_hex().to_string();
+        if digest.to_lowercase() != offered.hash.trim().to_lowercase() {
+            return Err("avatar bytes do not match the hash the peer offered".into());
+        }
+        self.cache_avatar(
+            &offered.peer_id,
+            &offered.bytes,
+            offered.width,
+            offered.height,
+            &offered.media_type,
+            offered.updated_ms,
+        )
+    }
+
     pub fn avatar_for_peer(&self, peer_id: &str) -> Result<Option<Avatar>, String> {
         self.connection
             .query_row(
@@ -1238,6 +1352,24 @@ impl Store {
         now_ms: u64,
     ) -> Result<bool, String> {
         let window = self.edit_window()?;
+        self.edit_message_within(id, actor, body, clock, now_ms, window)
+    }
+
+    /// The same decision with the window supplied by the caller.
+    ///
+    /// The desktop reads the edit window from `settings.json` — the file the Settings screen
+    /// writes — so it hands the rule in here rather than mirroring the number into the store's
+    /// settings rows, exactly as it does for the file size limits. The store still owns the
+    /// decision; only the source of the number differs.
+    pub fn edit_message_within(
+        &mut self,
+        id: Uuid,
+        actor: &str,
+        body: &str,
+        clock: Hlc,
+        now_ms: u64,
+        window: EditWindow,
+    ) -> Result<bool, String> {
         let Some(message) = self.get_message(id)? else {
             return Ok(false);
         };
@@ -1439,6 +1571,7 @@ mod tests {
                 logical: 0,
             },
             tombstone: false,
+            forwarded: false,
         }
     }
 
@@ -1492,6 +1625,36 @@ mod tests {
             .unwrap());
         assert!(store.reactions_for_message(message.id).unwrap().is_empty());
         assert!(store.add_reaction(message.id, " ", "emoji", 20).is_err());
+    }
+
+    #[test]
+    fn read_receipts_only_report_my_messages_in_that_chat() {
+        let mut store = store();
+        let mine = message("peer-b", "local", "from me", 10);
+        let theirs = message("peer-b", "peer-b", "from them", 11);
+        let elsewhere = message("peer-c", "local", "another chat", 12);
+        store.save_message(&mine).unwrap();
+        store.save_message(&theirs).unwrap();
+        store.save_message(&elsewhere).unwrap();
+        for id in [mine.id, theirs.id, elsewhere.id] {
+            store
+                .record_receipt(id, "peer-b", ReceiptKind::Read, 20)
+                .unwrap();
+        }
+        let read = store
+            .read_receipt_ids_for_chat("peer-b", "local", "peer-b")
+            .unwrap();
+        assert_eq!(read, HashSet::from([mine.id]));
+        // A delivered receipt is not a read receipt.
+        let other = message("peer-d", "local", "delivered only", 13);
+        store.save_message(&other).unwrap();
+        store
+            .record_receipt(other.id, "peer-d", ReceiptKind::Delivered, 21)
+            .unwrap();
+        assert!(store
+            .read_receipt_ids_for_chat("peer-d", "local", "peer-d")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -1568,9 +1731,9 @@ mod tests {
         for saved in [&first, &second, &elsewhere] {
             store.save_message(saved).unwrap();
         }
-        assert!(store.pin(second.id, 1, 40).unwrap());
-        assert!(store.pin(first.id, 0, 41).unwrap());
-        assert!(store.pin(elsewhere.id, 5, 42).unwrap());
+        assert!(store.pin(second.id, 1, 40, "peer-a").unwrap());
+        assert!(store.pin(first.id, 0, 41, "peer-a").unwrap());
+        assert!(store.pin(elsewhere.id, 5, 42, "peer-a").unwrap());
         let pinned = store.pinned_for_chat("chat-1").unwrap();
         assert_eq!(
             pinned.iter().map(|pin| pin.message.id).collect::<Vec<_>>(),
@@ -1578,13 +1741,17 @@ mod tests {
         );
         assert_eq!(pinned[0].position, 0);
         // Repositioning is an update, not a second row.
-        assert!(store.pin(second.id, 0, 50).unwrap());
+        assert!(store.pin(second.id, 0, 50, "peer-b").unwrap());
         assert_eq!(store.pinned_for_chat("chat-1").unwrap().len(), 2);
         assert!(store.unpin(first.id).unwrap());
         assert!(!store.unpin(first.id).unwrap());
         assert_eq!(
             store.pinned_for_chat("chat-1").unwrap()[0].message.id,
             second.id
+        );
+        assert_eq!(
+            store.pinned_for_chat("chat-1").unwrap()[0].pinned_by,
+            "peer-b"
         );
 
         assert!(store.star(first.id, 60).unwrap());
@@ -1599,13 +1766,50 @@ mod tests {
 
         // Pins and stars never attach to a tombstone or an unknown message.
         assert!(store.tombstone_message(second.id, "peer-a").unwrap());
-        assert!(!store.pin(second.id, 9, 70).unwrap());
+        assert!(!store.pin(second.id, 9, 70, "peer-a").unwrap());
         assert!(!store.star(second.id, 70).unwrap());
-        assert!(!store.pin(Uuid::now_v7(), 0, 70).unwrap());
+        assert!(!store.pin(Uuid::now_v7(), 0, 70, "peer-a").unwrap());
         // Deleting the message takes its pin and star with it.
         assert!(store.clear_chat_history("chat-1").unwrap() >= 2);
         assert!(store.pinned_for_chat("chat-1").unwrap().is_empty());
         assert!(store.starred_for_chat("chat-1").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_pin_remembers_who_asked_for_it() {
+        let mut store = store();
+        let asked = message("chat-1", "peer-a", "quarterly figures", 10);
+        store.save_message(&asked).unwrap();
+
+        // A peer's frame pins on this device, so the author is that peer. Before v7 this
+        // row claimed the local device, which is the one thing the frame says it is not.
+        assert!(store.pin(asked.id, 0, 40, "peer-b").unwrap());
+        assert_eq!(
+            store.pinned_for_chat("chat-1").unwrap()[0].pinned_by,
+            "peer-b"
+        );
+        // Re-asking replaces the author instead of adding a second claim.
+        assert!(store.pin(asked.id, 3, 50, "peer-a").unwrap());
+        let pinned = store.pinned_for_chat("chat-1").unwrap();
+        assert_eq!(pinned.len(), 1);
+        assert_eq!(pinned[0].position, 3);
+        assert_eq!(pinned[0].pinned_by, "peer-a");
+
+        // A row written before migration v7 carries no author and gains none by being read.
+        let legacy = message("chat-1", "peer-a", "pinned before v7", 11);
+        store.save_message(&legacy).unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO pins(message_id, chat_id, position, pinned_ms) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![legacy.id.to_string(), "chat-1", 4_i64, 60_i64],
+            )
+            .unwrap();
+        let pinned = store.pinned_for_chat("chat-1").unwrap();
+        assert_eq!(pinned.len(), 2);
+        assert_eq!(pinned[1].message.id, legacy.id);
+        assert_eq!(pinned[1].pinned_by, "");
     }
 
     #[test]
@@ -1650,6 +1854,54 @@ mod tests {
         // Retention drops attachment rows whose message is gone.
         assert!(store.clear_chat_history(chat).unwrap() >= 1);
         assert!(store.attachments_for_chat(chat).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_stalled_transfer_becomes_resumable_and_nothing_else_moves() {
+        let mut store = store();
+        let states = [
+            TransferState::Transferring,
+            TransferState::Paused,
+            TransferState::Offered,
+            TransferState::Accepted,
+            TransferState::Completed,
+            TransferState::Failed,
+            TransferState::Cancelled,
+        ];
+        let mut written = Vec::new();
+        for (index, state) in states.iter().enumerate() {
+            let message = message("chat-1", "peer-a", "here is the file", 10 + index as u64);
+            store.save_message(&message).unwrap();
+            let attachment = Attachment {
+                id: Uuid::now_v7(),
+                chat_id: "chat-1".into(),
+                message_id: Some(message.id),
+                file_name: "clip.mp4".into(),
+                size_bytes: 8_192,
+                blake3_hash: Some(*blake3::hash(b"bytes").as_bytes()),
+                state: *state,
+                updated_ms: 20,
+            };
+            store.upsert_attachment(&attachment).unwrap();
+            written.push(attachment);
+        }
+
+        assert_eq!(store.pause_stalled_transfers().unwrap(), 1);
+        let listed = store.attachments_for_chat("chat-1").unwrap();
+        assert_eq!(listed.len(), states.len());
+        for row in &listed {
+            let before = written.iter().find(|item| item.id == row.id).unwrap();
+            let expected = if before.state == TransferState::Transferring {
+                TransferState::Paused
+            } else {
+                before.state
+            };
+            assert_eq!(row.state, expected, "{}", row.id);
+            // The pass retires the claim, not the record of when bytes last moved.
+            assert_eq!(row.updated_ms, before.updated_ms);
+        }
+        // A restart with nothing left to heal says so by changing no rows.
+        assert_eq!(store.pause_stalled_transfers().unwrap(), 0);
     }
 
     #[test]
@@ -1757,6 +2009,59 @@ mod tests {
     }
 
     #[test]
+    fn pending_announcements_exclude_the_author_and_acked_rows() {
+        let mut store = store();
+        let older = Announcement {
+            id: Uuid::now_v7(),
+            group_id: "group-1".into(),
+            sender: "peer-a".into(),
+            body: "older notice".into(),
+            clock: Hlc {
+                physical_ms: 1,
+                logical: 0,
+            },
+            admins_only: false,
+            created_ms: 1,
+        };
+        let newer = Announcement {
+            id: Uuid::now_v7(),
+            group_id: "group-1".into(),
+            sender: "peer-a".into(),
+            body: "newer notice".into(),
+            clock: Hlc {
+                physical_ms: 2,
+                logical: 0,
+            },
+            admins_only: false,
+            created_ms: 2,
+        };
+        let mine = Announcement {
+            id: Uuid::now_v7(),
+            group_id: "group-1".into(),
+            sender: "local".into(),
+            body: "my own post".into(),
+            clock: Hlc {
+                physical_ms: 3,
+                logical: 0,
+            },
+            admins_only: false,
+            created_ms: 3,
+        };
+        for item in [&older, &newer, &mine] {
+            assert!(store.save_announcement(item).unwrap());
+        }
+        assert_eq!(
+            store.pending_announcements("local").unwrap(),
+            vec![newer.clone(), older.clone()],
+            "newest first, author excluded"
+        );
+        assert!(store
+            .acknowledge_announcement(newer.id, "local", 4)
+            .unwrap());
+        assert_eq!(store.pending_announcements("local").unwrap(), vec![older]);
+    }
+
+    #[test]
     fn call_events_round_trip_in_order() {
         let mut store = store();
         let call_id = Uuid::now_v7();
@@ -1838,13 +2143,16 @@ mod tests {
             .unwrap();
         assert_eq!(store.auto_download_limit_bytes().unwrap(), 1_024);
         assert_eq!(store.max_file_bytes().unwrap(), 4_096);
+        // A key the table has never heard of is a miss, not an error; the default is the
+        // caller's, so this is the generic half of every reader below. An ad-hoc string is
+        // used rather than a declared key because nothing here is meant to be reading it.
         assert_eq!(
-            store.get_setting::<u64>(setting::RATE_LIMIT_BURST).unwrap(),
+            store.get_setting::<u64>("network.not_a_setting").unwrap(),
             None
         );
         assert_eq!(
             store
-                .get_setting_or::<u64>(setting::RATE_LIMIT_BURST, 42)
+                .get_setting_or::<u64>("network.not_a_setting", 42)
                 .unwrap(),
             42
         );
@@ -1871,6 +2179,77 @@ mod tests {
         let keys: Vec<String> = store.all_settings().unwrap().into_keys().collect();
         assert!(keys.contains(&setting::EDIT_WINDOW_MS.to_owned()));
         assert!(store.set_setting("", &1_u64, 0).is_err());
+    }
+
+    /// A declared key is a claim that some preference exists; three of them used to be
+    /// claims nothing read (`network.rate_limit_per_second`, `network.rate_limit_burst`,
+    /// `history.hide_deleted_messages`), which is why this seam is scanned and not trusted.
+    #[test]
+    fn every_declared_setting_key_is_read_in_this_crate() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("store_ext.rs");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        let module_start = text
+            .find("pub mod setting {")
+            .expect("this file declares the setting module");
+        let module = &text[module_start..module_start + text[module_start..].find("\n}").unwrap()];
+        let production = &text[..text
+            .find("#[cfg(test)]")
+            .expect("the test module is marked")];
+
+        let mut declared: Vec<(String, String)> = Vec::new();
+        for line in module.lines() {
+            let Some(rest) = line.trim().strip_prefix("pub const ") else {
+                continue;
+            };
+            let (name, tail) = rest.split_once(": &str = \"").unwrap_or_else(|| {
+                panic!("`{}` is not a `&str` constant the scanner can read", rest)
+            });
+            let value = tail
+                .split('"')
+                .next()
+                .unwrap_or_else(|| panic!("`{name}` has no string literal"));
+            declared.push((name.to_string(), value.to_string()));
+        }
+        // Nothing silently leaves the audited set: adding a key is a decision, and so is
+        // removing one, because this list is the record of what the table is for.
+        let names: Vec<&str> = declared.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "EDIT_WINDOW_MS",
+                "AUTO_DOWNLOAD_LIMIT_BYTES",
+                "MAX_FILE_BYTES",
+                "ANNOUNCEMENTS_ADMINS_ONLY",
+                "RETENTION_DAYS",
+                "AVATAR_MAX_BYTES",
+                "AVATAR_MAX_DIMENSION",
+                "AVATAR_MAX_PIXELS",
+            ]
+        );
+        let mut values: Vec<&str> = declared.iter().map(|(_, value)| value.as_str()).collect();
+        values.sort_unstable();
+        let unique = values.len();
+        values.dedup();
+        assert_eq!(
+            values.len(),
+            unique,
+            "two keys share a name in the table, so one setting silently owns another"
+        );
+        for (name, value) in &declared {
+            assert!(
+                value.contains('.') && value.to_lowercase() == *value,
+                "`{name}` = `{value}` is not a dotted lower-case key like its siblings"
+            );
+            // The reader has to exist outside this test module; a key referenced only from a
+            // test is a string somebody proved round-trips and nobody else can reach.
+            assert!(
+                production.contains(&format!("setting::{name}")),
+                "`{name}` (`{value}`) is declared but read nowhere in non-test code"
+            );
+        }
     }
 
     #[test]
@@ -1933,6 +2312,88 @@ mod tests {
             .contains("Tombstoned"));
     }
 
+    /// The desktop's route: the window comes from `settings.json`, not from the store.
+    ///
+    /// Both spellings have to reach the same verdict for the same instants, or the number the
+    /// Settings screen shows means one thing to the composer and another to the write.
+    #[test]
+    fn a_window_handed_in_gates_edits_without_the_store_key() {
+        let mut store = store();
+        let sent = message("chat-window", "peer-a", "written at one", 1_000);
+        store.save_message(&sent).unwrap();
+        let clock = Hlc {
+            physical_ms: 1_600,
+            logical: 0,
+        };
+        // No `setting::EDIT_WINDOW_MS` row exists here, so the default 24 h window would let
+        // this through — the caller's window is the one that decides.
+        assert_eq!(store.edit_window().unwrap(), EditWindow::default());
+        assert!(store
+            .edit_message_within(
+                sent.id,
+                "peer-a",
+                "late for me",
+                clock,
+                1_600,
+                EditWindow::new(500)
+            )
+            .unwrap_err()
+            .contains("EditWindowExpired"));
+        let second = message("chat-window", "peer-a", "another row", 1_000);
+        store.save_message(&second).unwrap();
+        assert!(store
+            .edit_message_within(
+                second.id,
+                "peer-a",
+                "in time",
+                clock,
+                1_500,
+                EditWindow::new(500),
+            )
+            .unwrap());
+        // The authority and permanence rules are the caller-supplied window's too.
+        let thirds = [
+            message("chat-window", "peer-a", "not yours", 1_000),
+            message("chat-window", "peer-a", "tombstoned", 1_000),
+        ];
+        for row in &thirds {
+            store.save_message(row).unwrap();
+        }
+        assert!(store
+            .edit_message_within(
+                thirds[0].id,
+                "peer-b",
+                "forged",
+                clock,
+                1_400,
+                EditWindow::new(500),
+            )
+            .unwrap_err()
+            .contains("NotSender"));
+        assert!(store.tombstone_message(thirds[1].id, "peer-a").unwrap());
+        assert!(store
+            .edit_message_within(
+                thirds[1].id,
+                "peer-a",
+                "resurrected",
+                clock,
+                1_100,
+                EditWindow::new(500),
+            )
+            .unwrap_err()
+            .contains("Tombstoned"));
+        assert!(!store
+            .edit_message_within(
+                Uuid::now_v7(),
+                "peer-a",
+                "ghost",
+                clock,
+                1_100,
+                EditWindow::new(500),
+            )
+            .unwrap());
+    }
+
     #[test]
     fn avatars_are_validated_before_caching_and_survive_reopen() {
         let mut store = store();
@@ -1974,6 +2435,39 @@ mod tests {
             .contains("TooManyBytes"));
         assert_eq!(store.prune_avatars(u64::from(u32::MAX)).unwrap(), 1);
         assert!(store.avatar_for_peer("peer-a").unwrap().is_none());
+    }
+
+    #[test]
+    fn an_offered_avatar_is_cached_only_when_the_bytes_match_the_offer() {
+        let mut store = store();
+        let bytes = png(128, 128);
+        let hash = blake3::hash(&bytes).to_hex().to_string();
+        let offer = |bytes: &[u8], hash: &str, peer: &str| Avatar {
+            peer_id: peer.to_owned(),
+            media_type: "image/png".to_owned(),
+            width: 128,
+            height: 128,
+            hash: hash.to_owned(),
+            bytes: bytes.to_vec(),
+            updated_ms: 10,
+        };
+
+        let stored = store
+            .cache_offered_avatar(&offer(&bytes, &hash.to_uppercase(), "peer-a"))
+            .expect("a matching offer caches");
+        assert_eq!(stored.hash, hash);
+
+        // A second offer for the same peer whose bytes do not hash to itself is refused, and
+        // the copy already on disk survives it — a lie cannot replace a photo.
+        assert!(store
+            .cache_offered_avatar(&offer(b"junk", &hash, "peer-a"))
+            .unwrap_err()
+            .contains("do not match"));
+        assert_eq!(store.avatar_for_peer("peer-a").unwrap().unwrap(), stored);
+        assert!(store
+            .cache_offered_avatar(&offer(&bytes, "not-a-hash", "peer-b"))
+            .is_err());
+        assert!(store.avatar_for_peer("peer-b").unwrap().is_none());
     }
 
     #[test]

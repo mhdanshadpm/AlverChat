@@ -84,6 +84,11 @@ pub struct Message {
     pub body: String,
     pub clock: Hlc,
     pub tombstone: bool,
+    /// True when this row is a copy of something that arrived from another thread.
+    ///
+    /// A forward keeps no link back to its source on purpose: the original may live in a chat
+    /// the recipient is not in, so the only honest statement about it is that it was forwarded.
+    pub forwarded: bool,
 }
 
 #[derive(Default)]
@@ -216,6 +221,7 @@ mod tests {
             body: "hello".into(),
             clock: Hlc::default(),
             tombstone: false,
+            forwarded: false,
         };
         let mut l = MessageLedger::default();
         assert!(l.apply(m.clone()));
@@ -239,6 +245,7 @@ mod tests {
                 logical: 0,
             },
             tombstone: false,
+            forwarded: false,
         }));
         assert_eq!(ledger.revisions(&id), &[(0, "first".to_owned())]);
         assert_eq!(

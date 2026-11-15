@@ -1,8 +1,13 @@
 import i18next from 'i18next';
 import { initReactI18next } from 'react-i18next';
-import common from './en/common';
-
 export type Catalog = Record<string, string>;
+
+/**
+ * Every language this app can serve, and the only list the picker, the catalogs and i18next
+ * are read against. `i18n.keys.test.ts` fails it against the catalog directories, so a
+ * language here with no strings beside it is caught instead of silently falling back.
+ */
+export const LANGUAGES = ['en'];
 
 const RTL_LANGUAGES = ['ar', 'he', 'fa', 'ur'];
 
@@ -22,23 +27,13 @@ export function registerNamespace(namespace: string, catalog: Catalog): void {
 function init(): void {
   initialized = true;
   void i18next.use(initReactI18next).init({
-    lng: storedLanguage(),
+    lng: LANGUAGES[0],
     fallbackLng: 'en',
-    supportedLngs: ['en'],
-    ns: ['common'],
-    defaultNS: 'common',
-    resources: { en: { common } },
+    supportedLngs: LANGUAGES,
+    resources: { en: {} },
     interpolation: { escapeValue: false },
     returnNull: false,
   });
-}
-
-function storedLanguage(): string {
-  try {
-    return localStorage.getItem('alverchat.language') ?? 'en';
-  } catch {
-    return 'en';
-  }
 }
 
 export function t(key: string, fallback: string, vars?: Record<string, unknown>): string {
@@ -60,13 +55,12 @@ export function isRtl(lang = language()): boolean {
   return RTL_LANGUAGES.includes(lang.split('-')[0]);
 }
 
+/**
+ * Switch the catalogs. Settings' `language` is the store — this is the only writer, and the
+ * only reader is `useAppBridge`, so the pick and the strings cannot come apart.
+ */
 export function setLanguage(lang: string): void {
   if (!initialized) init();
-  try {
-    localStorage.setItem('alverchat.language', lang);
-  } catch {
-    // Private mode: the language only lives for this session.
-  }
   void i18next.changeLanguage(lang);
   applyDirection();
 }
@@ -76,5 +70,3 @@ export function applyDirection(): void {
   document.documentElement.dir = isRtl() ? 'rtl' : 'ltr';
   document.documentElement.lang = language();
 }
-
-export { useTranslation } from 'react-i18next';
