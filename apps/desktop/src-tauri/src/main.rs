@@ -5765,6 +5765,50 @@ mod release_config_tests {
     }
 
     #[test]
+    fn the_macos_bundle_is_signed_and_iconed_before_it_is_archived() {
+        let config = json("apps/desktop/src-tauri/tauri.conf.json");
+        // `bundle > macOS > signingIdentity` is the only thing that makes the bundler reach
+        // `codesign` at all: with no identity it builds no keychain, skips the whole signing
+        // branch, and the `.app` ships carrying only the linker's ad-hoc signature on the
+        // executable — no `Contents/_CodeSignature/`, `Info.plist` unbound. Gatekeeper calls that
+        // shape "code has no resources but signature indicates they must be present", and a
+        // quarantined copy of it is the "AlverChat is damaged and can't be opened" the v0.1.4 dmg
+        // produced. The identity here is `-`, so no certificate is needed; it also means the four
+        // entitlements this file has declared since the first release are finally embedded.
+        let identity = config["bundle"]["macOS"]["signingIdentity"].as_str();
+        assert!(
+            identity.is_some_and(|name| !name.is_empty()),
+            "bundle.macOS.signingIdentity is not a non-empty string, so the release signs nothing \
+             and every downloaded install opens as a damaged app: {identity:?}"
+        );
+        // `bundle > icon` defaults to an empty list, and an empty list is not a missing decoration:
+        // `create_icns_file` returns `None` when there are no icon files, so the bundle gets no
+        // `Contents/Resources` and no `CFBundleIconFile`. The shipped v0.1.4 `.app` was exactly
+        // that — three files, `Contents/{Info.plist,MacOS/alverchat-desktop}` — and the same list
+        // is what gives the NSIS installer its icon, so a typo here fails the runner, not a gate.
+        let icons = strings(&config, &["bundle", "icon"]);
+        assert!(
+            !icons.is_empty(),
+            "bundle.icon is empty, which is the default, so the .app is archived with no Resources \
+             directory and no CFBundleIconFile"
+        );
+        for required in [".icns", ".ico"] {
+            assert!(
+                icons.iter().any(|icon| icon.ends_with(required)),
+                "bundle.icon is {icons:?}, which carries no {required} entry for the platform that \
+                 needs it"
+            );
+        }
+        for icon in &icons {
+            let path = root().join("apps/desktop/src-tauri").join(icon);
+            assert!(
+                path.exists(),
+                "bundle.icon names {icon}, which is not on disk, so the bundler cannot copy it"
+            );
+        }
+    }
+
+    #[test]
     fn the_permissions_the_install_flow_needs_are_granted_in_every_window() {
         let config = json("apps/desktop/src-tauri/capabilities/default.json");
         let permissions = strings(&config, &["permissions"]);
