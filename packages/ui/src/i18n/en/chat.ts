@@ -147,7 +147,11 @@ export default {
   attach: 'Attach',
   attachPhoto: 'Photo or video',
   attachFile: 'File or document',
+  attachScreenshot: 'Screenshot',
   attachVoice: 'Voice note',
+  screenshotUnavailable: 'Screen capture is not available in this window.',
+  screenshotDenied: 'Screen capture was cancelled.',
+  screenshotFailed: 'Could not capture the screen.',
   emoji: 'Emoji',
   recordVoice: 'Record a voice note',
 

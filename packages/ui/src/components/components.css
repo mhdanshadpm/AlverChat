@@ -181,6 +181,11 @@
   --ac-skeleton-hi: #2b3145;
   --ac-bubble-mine: #504197;
   --ac-bubble-mine-text: #ffffff;
+  /* These two are `var(...)` on :root, and a custom property is substituted where it is
+     declared. Left alone, incoming bubbles and menu rules inherit the light surface and
+     the light hairline even while `.dark` has already switched `--surface` and `--line`. */
+  --ac-bubble-theirs: var(--surface-3);
+  --ac-divider: var(--line);
   --ac-track: #2b3044;
   --ac-track-off: #454b63;
   --ac-danger-solid: #ff5f76;
@@ -1978,6 +1983,24 @@ button.ac-btn:focus-visible,
 .ac-bubble--mine .ac-bubble__meta {
   color: var(--accent);
 }
+/* On the saturated dark bubble the accent timestamp sits on the same purple and disappears. */
+.dark .ac-bubble--mine .ac-bubble__meta,
+.dark .ac-bubble--mine .ac-bubble__edited,
+.dark .ac-bubble--mine .ac-bubble__forwarded,
+.dark .ac-bubble--mine .ac-bubble__flags {
+  color: rgba(255, 255, 255, 0.78);
+}
+/* Sender colours are the avatar-disc inks, which are dark on purpose. On a dark bubble they need the lighter pair. */
+.dark .ac-bubble__sender {
+  color: #c4b8ff;
+}
+.dark .ac-bubble__sender--blue { color: #9ec4ff; }
+.dark .ac-bubble__sender--green { color: #8ee0b0; }
+.dark .ac-bubble__sender--peach { color: #ffc2a8; }
+.dark .ac-bubble__sender--yellow { color: #ffd98a; }
+.dark .ac-bubble__sender--rose { color: #ffb3d4; }
+.dark .ac-bubble__sender--purple { color: #d4b8ff; }
+.dark .ac-bubble__sender--cyan { color: #9aeee8; }
 .ac-bubble__ticks {
   display: inline-flex;
   align-items: center;

@@ -431,9 +431,22 @@ export default function App() {
               ) : (
                 <div className="ac-page__empty">
                   <EmptyState
+                    actions={
+                      <>
+                        <Button icon="plus" onClick={() => go('people')}>
+                          {text('startChat', 'New chat')}
+                        </Button>
+                        <Button icon="usersRound" onClick={() => go('groups')} variant="secondary">
+                          {text('startGroup', 'New group')}
+                        </Button>
+                        <Button icon="phone" onClick={() => go('calls')} variant="secondary">
+                          {text('startCall', 'New call')}
+                        </Button>
+                      </>
+                    }
                     icon="messageCircle"
-                    message={text('noChatBody', 'Pick someone from the list, or open People to find a peer on this network.')}
-                    title={text('noChatTitle', 'No chat selected')}
+                    message={text('noChatBody', 'Choose a conversation from the list, or start a new chat, group or call.')}
+                    title={text('noChatTitle', 'Select a chat to start')}
                   />
                 </div>
               )}

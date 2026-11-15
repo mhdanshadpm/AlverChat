@@ -547,6 +547,49 @@ export function Conversation({
     [bridge, chatId, jumpToLatest, reload, settings.maxFileSizeMb, toast],
   );
 
+  const captureScreenshot = useCallback(async () => {
+    setAttachOpen(false);
+    const capture = navigator.mediaDevices?.getDisplayMedia;
+    if (!capture) {
+      toast(text('screenshotUnavailable', 'Screen capture is not available in this window.'), 'neutral');
+      return;
+    }
+    let stream: MediaStream | null = null;
+    try {
+      stream = await capture.call(navigator.mediaDevices, { video: true, audio: false });
+      const video = document.createElement('video');
+      video.srcObject = stream;
+      video.muted = true;
+      await video.play();
+      const width = video.videoWidth;
+      const height = video.videoHeight;
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext('2d');
+      if (!context || width === 0 || height === 0) {
+        toast(text('screenshotFailed', 'Could not capture the screen.'), 'danger');
+        return;
+      }
+      context.drawImage(video, 0, 0, width, height);
+      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'));
+      if (!blob) {
+        toast(text('screenshotFailed', 'Could not capture the screen.'), 'danger');
+        return;
+      }
+      const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+      await pickFile(new File([blob], `Screenshot-${stamp}.png`, { type: 'image/png' }));
+    } catch (error) {
+      if (error instanceof DOMException && (error.name === 'NotAllowedError' || error.name === 'AbortError')) {
+        toast(text('screenshotDenied', 'Screen capture was cancelled.'), 'neutral');
+        return;
+      }
+      toast(text('screenshotFailed', 'Could not capture the screen.'), 'danger');
+    } finally {
+      stream?.getTracks().forEach((track) => track.stop());
+    }
+  }, [pickFile, toast]);
+
   const control = useCallback(
     async (attachmentId: string, action: 'pause' | 'resume' | 'retry' | 'cancel') => {
       try {
@@ -1149,6 +1192,10 @@ export function Conversation({
             >
               <Icon name="file" size={16} />
               {text('attachFile', 'File or document')}
+            </button>
+            <button className="ac-composer__attach-item" onClick={() => void captureScreenshot()} role="menuitem" type="button">
+              <Icon name="monitor" size={16} />
+              {text('attachScreenshot', 'Screenshot')}
             </button>
             <button className="ac-composer__attach-item" onClick={() => void startRecording()} role="menuitem" type="button">
               <Icon name="mic" size={16} />
