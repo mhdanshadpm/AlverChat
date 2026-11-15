@@ -81,7 +81,7 @@ dependencies = [
 
 [[package]]
 name = "alver-core"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -101,14 +101,14 @@ dependencies = [
 
 [[package]]
 name = "alver-platform"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "alverchat-desktop"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "alver-core",
  "base64 0.22.1",
