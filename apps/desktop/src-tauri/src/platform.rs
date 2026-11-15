@@ -553,9 +553,22 @@ pub fn set_lan_passphrase(app: AppHandle, passphrase: String) -> Result<bool, St
 #[tauri::command]
 pub fn has_lan_passphrase(app: AppHandle) -> bool {
     crate::secrets::Secrets::open(&app)
-        .and_then(|secrets| secrets.get(PASSPHRASE_ACCOUNT))
-        .map(|secret| secret.is_some_and(|secret| !secret.is_empty()))
+        .map(|secrets| stored_passphrase(&secrets).is_some())
         .unwrap_or(false)
+}
+
+/// The one rule that decides whether this network is sealed: a stored passphrase counts only
+/// when it has bytes in it. The transport asks it through `crate::lan_passphrase` and the
+/// Settings badge asks it through `has_lan_passphrase`, so the label a user reads and the
+/// challenge key that gates the HMAC are the same decision rather than two copies of it.
+pub fn sealing_passphrase(secret: Option<Vec<u8>>) -> Option<Vec<u8>> {
+    secret.filter(|value| !value.is_empty())
+}
+
+/// The stored passphrase, as both callers see it. Split out from the command so the badge can
+/// be tested against a throwaway profile instead of only against an `AppHandle`.
+pub(crate) fn stored_passphrase(secrets: &crate::secrets::Secrets) -> Option<Vec<u8>> {
+    sealing_passphrase(secrets.get(PASSPHRASE_ACCOUNT).ok().flatten())
 }
 
 #[tauri::command]
@@ -1607,6 +1620,50 @@ mod tests {
             Some(target_key.as_slice())
         );
         assert_eq!(chat_bodies(&target_database, &target_key), ["Keep me."]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The Settings badge and the transport's challenge key are two readers of one stored
+    /// secret, and the badge is a security label: it has to answer "is this network sealed?"
+    /// the way the HMAC does. `crate::lan_passphrase` and `has_lan_passphrase` used to state
+    /// that rule twice in two files; both now call `stored_passphrase`, which this drives
+    /// against a throwaway profile so the four shapes a store can hold are all decided here.
+    #[test]
+    fn the_badge_answers_the_same_question_the_transport_asks() {
+        let root = std::env::temp_dir().join(format!("alverchat-badge-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let secrets = crate::secrets::Secrets::files(root.clone());
+
+        // Never set: no seal. A fresh temp profile holds no messages.db, so this answer comes
+        // from the store itself and never reaches the credential store looking for a legacy key.
+        assert_eq!(secrets.get(PASSPHRASE_ACCOUNT).unwrap(), None);
+        assert_eq!(stored_passphrase(&secrets), None);
+
+        // The normal case: a passphrase is there, bytes and all.
+        secrets.set(PASSPHRASE_ACCOUNT, b"correct horse").unwrap();
+        assert_eq!(
+            stored_passphrase(&secrets).as_deref(),
+            Some(&b"correct horse"[..])
+        );
+
+        // The shape the settings screen cannot produce but a restore can: the file exists and
+        // is empty. Treating that as sealed would light up "Encrypted" over a session whose
+        // HMAC key is nothing, so it is the same answer as no file at all.
+        secrets.set(PASSPHRASE_ACCOUNT, b"").unwrap();
+        assert!(secrets.get(PASSPHRASE_ACCOUNT).unwrap().is_some());
+        assert_eq!(stored_passphrase(&secrets), None);
+
+        // Clearing it from Settings deletes the file, and the badge follows the store rather
+        // than the `lan_encryption` flag `persist` last wrote.
+        secrets.delete(PASSPHRASE_ACCOUNT).unwrap();
+        assert_eq!(stored_passphrase(&secrets), None);
+
+        // One rule, not two: the bytes a caller holds decide it, so a stored secret and the
+        // flag the same process shows cannot drift by differing on nothing but the reader.
+        assert!(!sealing_passphrase(Some(vec![])).is_some());
+        assert!(sealing_passphrase(Some(vec![b'x'])).is_some());
+        assert_eq!(sealing_passphrase(None), None);
+
         let _ = std::fs::remove_dir_all(&root);
     }
 }

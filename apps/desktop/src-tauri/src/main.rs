@@ -1056,9 +1056,7 @@ pub(crate) fn lan_passphrase(app: &AppHandle) -> Option<Vec<u8>> {
     if cache.is_none() {
         let secret = crate::secrets::Secrets::open(app)
             .ok()
-            .and_then(|secrets| secrets.get(platform::PASSPHRASE_ACCOUNT).ok())
-            .flatten()
-            .filter(|value| !value.is_empty());
+            .and_then(|secrets| platform::stored_passphrase(&secrets));
         *cache = Some(secret);
     }
     cache.clone().flatten()
@@ -5639,6 +5637,58 @@ mod settings_surface_tests {
              says nothing writes — either it is a writer the document has to describe, or this \
              guard is being satisfied by an unrelated string"
         );
+    }
+
+    /// The source of one function, from its signature to the first brace that closes a line.
+    /// Deliberately narrow: the assertions below are about a body, and a rule restated in the
+    /// neighbouring comments or in this module's own strings must not be what satisfies them.
+    fn one_fn(source: &str, marker: &str) -> String {
+        let start = source
+            .find(marker)
+            .unwrap_or_else(|| panic!("{marker} is gone from this file"));
+        let rest = &source[start..];
+        let end = rest
+            .find("\n}")
+            .unwrap_or_else(|| panic!("no closing line for {marker}"));
+        rest[..end].to_owned()
+    }
+
+    /// The Settings badge is a claim about the transport: `has_lan_passphrase` lights
+    /// "Encrypted", and `lan_passphrase` hands the frame HMAC its key. Until item 55 both
+    /// decided on their own whether a stored secret counts, in two files that no test joined —
+    /// so the label could be lit over a session whose key is an empty file. Both now read
+    /// through `platform::stored_passphrase`, and this is what keeps the join: a caller that
+    /// goes back to deciding by itself fails here, and the unit test over a throwaway profile
+    /// (`platform::tests::the_badge_answers_the_same_question_the_transport_asks`) is what
+    /// decides the answer.
+    #[test]
+    fn the_badge_and_the_challenge_key_read_the_stored_passphrase_through_one_rule() {
+        let shell = fs::read_to_string(root().join("apps/desktop/src-tauri/src/main.rs"))
+            .unwrap_or_else(|error| panic!("main.rs: {error}"));
+        let platform = fs::read_to_string(root().join("apps/desktop/src-tauri/src/platform.rs"))
+            .unwrap_or_else(|error| panic!("platform.rs: {error}"));
+        for (who, body) in [
+            (
+                concat!("lan_", "passphrase"),
+                one_fn(&shell, concat!("pub(crate) fn lan_", "passphrase")),
+            ),
+            (
+                concat!("has_", "lan_passphrase"),
+                one_fn(&platform, concat!("pub fn has_", "lan_passphrase")),
+            ),
+        ] {
+            assert!(
+                body.contains("stored_passphrase"),
+                "{who} no longer reads the secret store through the shared rule, so the badge \
+                 and the challenge key are back to two answers about one stored passphrase"
+            );
+            assert!(
+                !body.contains(concat!("is_", "empty")),
+                "{who} decides by itself whether a stored passphrase counts. That question is \
+                 `sealing_passphrase`'s; answering it a second time here is how the label and \
+                 the HMAC start disagreeing"
+            );
+        }
     }
 }
 
